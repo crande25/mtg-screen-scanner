@@ -4,6 +4,16 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### Fixed (2026-11-16, region modes)
+- **"Region is one card" could make identification impossible.** It treated the region as a
+  whole card and tried nothing else, so a region holding part of a card, which is what a fixed
+  region catches when a hand-held card drifts on a stream, never matched. Each mode now falls
+  back to the other: single-card mode searches inside the region, and detection mode reads the
+  region as one card. Confirmed on a live stream, where the same frame went from no match to
+  identifying Sol Ring.
+- The status bar now names this specific case and says what to change, instead of suggesting a
+  larger region.
+
 ### User-facing (2026-11-16, live video)
 - **Cards on a live video stream are now identified.** A filmed card matches far less exactly
   than a digital image, so it was being rejected by a fixed distance cutoff even when correct.

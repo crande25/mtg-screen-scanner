@@ -626,13 +626,13 @@ class ScannerApp:
             self.prices.request(d.card, lambda c, q: self.events.put(("price", c, q)))
         self._last_ids = ids_now
         self._refresh_history()
-        summary = self._scan_summary(scanned, secs)
+        summary = self._scan_summary(scanned, secs, bool(self.settings.get("single_card")))
         if self.held_for is not None:
             summary += f"  Holding the last agreed card, seen {self.held_for:.0f}s ago."
         self._update_status(summary)
 
     @staticmethod
-    def _scan_summary(dets: list[Detection], secs: float) -> str:
+    def _scan_summary(dets: list[Detection], secs: float, single_card: bool = False) -> str:
         """Say what the scan actually found, so an empty table is never unexplained."""
         took = f"in {secs * 1000:.0f} ms"
         errors = [d for d in dets if d.note.startswith("error:")]
@@ -643,8 +643,11 @@ class ScannerApp:
                     ". If the region is drawn around a single card, tick 'Region is one card'.")
         found = sum(1 for d in dets if d.card)
         if found == 0:
-            return (f"Last scan: {len(dets)} card shape(s), none matched the index {took}. "
-                    "Try a larger region, or build the index for this card's set.")
+            advice = ("The region may hold only part of a card. Untick 'Region is one card' and "
+                      "draw it around the whole card, or the video, so the card can be found inside it."
+                      if single_card else
+                      "Draw the region closer around the card, or build the index for its set.")
+            return f"Last scan: nothing matched the index {took}. {advice}"
         return f"Last scan: {len(dets)} card shape(s), {found} identified {took}"
 
     def _on_price(self, card: CardRecord, quote: PriceQuote):

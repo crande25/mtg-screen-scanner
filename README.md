@@ -147,8 +147,15 @@ Two things make it work:
   rather than flickering between a card and nothing, and the table shows `held Ns` while it
   is relying on earlier frames. The card several frames agree on wins over a one-frame fluke.
 
-Keep the region on the card itself rather than the whole video player, and note that any
-window placed over the region is what gets scanned, since the app reads the screen.
+**Draw the region around the video, not tightly around the card.** On a stream the card is
+usually hand-held and drifts, so a tight region ends up holding a corner of it, which can
+never be matched. Give the region the area the card moves within and let the app find the card
+inside it. "Region is one card" is only a hint about where to look first; if that reading
+fails the app searches inside the region anyway, and the other way round.
+
+Note that the app reads the screen, so any window placed over the region is what gets scanned.
+A card is also identified only while it is fully visible: fingers across the face, a sharp
+tilt or a glare covering the art will drop frames, which is what the held reading is for.
 
 ## Accuracy notes and limits
 

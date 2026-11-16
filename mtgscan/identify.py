@@ -108,14 +108,29 @@ class Identifier:
 
         # Last resort: if detection found nothing usable but the region is itself card
         # shaped, the user has probably drawn it around a single card, so read it as one.
-        if not single_card and not any(d.card for d in out) and looks_like_card(frame):
-            try:
-                whole = self.identify_card(frame, whole_frame_quad(frame), allow_name_fallback=False)
-                if whole.card is not None:
-                    whole.note = (whole.note + "; " if whole.note else "") + "read as a single card"
-                    out = [whole]
-            except Exception as e:
-                log.exception("whole-frame fallback failed: %s", e)
+        # Each mode falls back to the other. "Region is one card" is a hint about where to
+        # look first, not a promise: a hand-held card on a stream drifts out of a fixed
+        # region, leaving only part of it inside, and then the region is not a whole card at
+        # all. Looking inside it costs nothing once the first reading has failed.
+        if not any(d.card for d in out):
+            if single_card:
+                alternates = [q for q in find_cards(frame) if q.size[0] >= MIN_QUAD_WIDTH]
+                label = "found inside the region"
+            elif looks_like_card(frame):
+                alternates = [whole_frame_quad(frame)]
+                label = "read as a single card"
+            else:
+                alternates, label = [], ""
+            for quad in alternates:
+                try:
+                    alt = self.identify_card(frame, quad, allow_name_fallback=False)
+                except Exception as e:
+                    log.exception("alternate reading failed: %s", e)
+                    continue
+                if alt.card is not None:
+                    alt.note = (alt.note + "; " if alt.note else "") + label
+                    out = [alt]
+                    break
 
         if not any(d.card for d in out):
             try:

@@ -185,6 +185,26 @@ def test_a_filmed_card_is_identified(small_index):
     assert dets[0].card.id == rec.id, (dets[0].card.name, dets[0].distance, dets[0].margin)
 
 
+def test_single_card_mode_still_finds_a_card_inside_the_region(small_index):
+    """"Region is one card" must be a hint, not a promise.
+
+    A hand-held card on a stream drifts inside a fixed region, so the region often holds a
+    card plus a good deal of other content. Treating the whole region as the card then fails
+    every time, which is exactly what was reported from a live auction stream.
+    """
+    rec = _pick(small_index, 4)[2]
+    card = _normal_image(rec)
+    h, w = card.shape[:2]
+    frame = np.full((int(h * 1.7), int(w * 1.6), 3), (30, 30, 30), np.uint8)
+    frame[40:40 + h, 70:70 + w] = card          # card is only part of the region
+
+    dets = Identifier(small_index, ocr=None).identify_frame(frame, single_card=True)
+    assert any(d.card for d in dets), [d.note for d in dets]
+    hit = next(d for d in dets if d.card)
+    assert hit.card.id == rec.id, (hit.card.name, hit.distance)
+    assert "found inside the region" in hit.note
+
+
 def test_noise_is_still_rejected_under_the_margin_rule(small_index):
     """The relaxed ceiling must not let content that is not a card through."""
     rng = np.random.default_rng(11)
