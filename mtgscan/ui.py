@@ -390,7 +390,11 @@ class ScannerApp:
         except ValueError:
             pass
         self.settings["single_card"] = bool(self.single_var.get())
-        self.settings["use_ocr"] = bool(self.ocr_var.get())
+        # Only record the OCR preference while the box is usable. When the package was
+        # missing the app unticked it, and the next settings change persisted that as a
+        # deliberate choice, leaving OCR off for good once the package was installed.
+        if str(self.ocr_chk.cget("state")) != "disabled":
+            self.settings["use_ocr"] = bool(self.ocr_var.get())
         for key, label in MODES.items():
             if label == self.pricing_var.get():
                 self.settings["pricing"] = key
@@ -475,7 +479,10 @@ class ScannerApp:
             self.start_btn.configure(state="normal")
             if ocr is not None and not ocr.available:
                 self.ocr_chk.configure(state="disabled")
-                self.ocr_var.set(False)
+                self.ocr_var.set(False)        # shown as off, but not saved as a preference
+            else:
+                self.ocr_chk.configure(state="normal")
+                self.ocr_var.set(bool(self.settings.get("use_ocr", True)))
         else:
             self.identifier = None
             self.start_btn.configure(state="disabled")
