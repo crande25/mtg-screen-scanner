@@ -129,6 +129,14 @@ Check any card from the command line (add `--modes` to pick sources):
 
 ## Accuracy notes and limits
 
+- **Draw the region close around the cards.** Measured against a card displayed on a real
+  desktop, a region drawn tightly on the card, or with a modest margin, is identified; a
+  region with a lot of cluttered desktop around a single card is not. Finding a card's outer
+  edge is hard when its black border sits on a dark background, and the match is intolerant of
+  a few percent of misalignment. Three things mitigate it: the region's bounding box is tried
+  as well as the detected outline, a card-shaped region is read as a single card if detection
+  finds nothing, and an edge-projection pass recovers upright cards the outline step misses.
+  A clean background, such as a web page of card images, works much better than a busy desktop.
 - Cards must be at least ~40 px wide on screen. The collector-line OCR needs ~300 px tall and
   is skipped below that rather than guessed at.
 - Heavy glare, fingers over the art or extreme angles can push a card past the match threshold;

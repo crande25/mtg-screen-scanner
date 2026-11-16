@@ -66,6 +66,37 @@ def _aspect_ok(pts: np.ndarray, lo: float = 0.60, hi: float = 0.84) -> bool:
     return lo <= r <= hi
 
 
+def quad_is_sane(pts: np.ndarray, side_ratio: float = 0.80,
+                 min_angle: float = 55.0, max_angle: float = 125.0) -> bool:
+    """Reject quads that are not a plausible view of a rectangle.
+
+    The aspect test alone averages opposite sides, so a badly skewed shape whose mean
+    dimensions happen to look card-like slips through. On a dark background a card's own
+    black border gives a weak outer edge, and the contour step then produces exactly that:
+    a lopsided quad spanning most of the frame. Here opposite sides must be of similar
+    length and every corner must be somewhere near a right angle, which still allows the
+    perspective of a photographed card while discarding noise.
+    """
+    tl, tr, br, bl = pts
+    top, bottom = np.linalg.norm(tr - tl), np.linalg.norm(br - bl)
+    left, right = np.linalg.norm(bl - tl), np.linalg.norm(br - tr)
+    if min(top, bottom) < 1 or min(left, right) < 1:
+        return False
+    if min(top, bottom) / max(top, bottom) < side_ratio:
+        return False
+    if min(left, right) / max(left, right) < side_ratio:
+        return False
+    for a, vertex, c in ((bl, tl, tr), (tl, tr, br), (tr, br, bl), (br, bl, tl)):
+        v1, v2 = a - vertex, c - vertex
+        denom = float(np.linalg.norm(v1) * np.linalg.norm(v2))
+        if denom < 1e-6:
+            return False
+        angle = np.degrees(np.arccos(np.clip(float(np.dot(v1, v2)) / denom, -1.0, 1.0)))
+        if not (min_angle <= angle <= max_angle):
+            return False
+    return True
+
+
 def _quads_from_binary(binary: np.ndarray, min_area: float, max_area: float) -> list[np.ndarray]:
     contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
     out: list[np.ndarray] = []
@@ -85,7 +116,7 @@ def _quads_from_binary(binary: np.ndarray, min_area: float, max_area: float) -> 
             if rw * rh <= 0 or a / (rw * rh) < 0.88:
                 continue
             pts = order_points(cv2.boxPoints(rect))
-        if _aspect_ok(pts):
+        if _aspect_ok(pts) and quad_is_sane(pts):
             out.append(pts)
     return out
 
@@ -134,6 +165,15 @@ def find_cards(frame: np.ndarray, min_area_frac: float = 0.003, max_area_frac: f
     edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
     cands += _quads_from_binary(edges, min_area, max_area)
 
+    # A card's black border against a dark background is a very weak edge (seen on screen:
+    # background 37, border 18), which the pass above misses. Local contrast equalisation
+    # plus lower thresholds recovers it. CLAHE is what magic_card_detector uses for the
+    # same reason.
+    equalised = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(blur)
+    soft = cv2.Canny(equalised, 15, 60)
+    soft = cv2.dilate(soft, np.ones((3, 3), np.uint8), iterations=1)
+    cands += _quads_from_binary(soft, min_area, max_area)
+
     thr = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 7)
     cands += _quads_from_binary(thr, min_area, max_area)
 
@@ -153,6 +193,72 @@ def warp_card(frame: np.ndarray, quad: Quad, out_w: int = WARP_W, out_h: int = W
     dst = np.array([[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]], dtype=np.float32)
     m = cv2.getPerspectiveTransform(pts, dst)
     return cv2.warpPerspective(frame, m, (out_w, out_h), flags=cv2.INTER_AREA)
+
+
+def _peaks(energy: np.ndarray, limit: int, min_gap: int) -> list[int]:
+    """Strongest positions in a 1-D edge-energy profile, kept apart by min_gap."""
+    order = np.argsort(energy)[::-1]
+    chosen: list[int] = []
+    floor = float(energy.mean()) + 0.5 * float(energy.std())
+    for i in order:
+        if energy[i] < floor:
+            break
+        if all(abs(int(i) - c) >= min_gap for c in chosen):
+            chosen.append(int(i))
+        if len(chosen) >= limit:
+            break
+    return sorted(chosen)
+
+
+def projection_quads(frame: np.ndarray, min_area: float, max_area: float,
+                     max_quads: int = 4, peaks_per_axis: int = 7) -> list[Quad]:
+    """Upright card rectangles found by projecting edge energy onto each axis.
+
+    Per-pixel thresholding needs local contrast, which a card's black border on a dark
+    background does not have. Summing the gradient down whole columns and across whole
+    rows accumulates that weak edge over hundreds of pixels until it stands out, which
+    suits screen captures because cards on a screen are almost always upright. Pairs of
+    peaks are kept only where the spacing matches a card's 63:88 proportions.
+    """
+    gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    h, w = gray.shape[:2]
+    col = np.abs(cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)).sum(axis=0)
+    row = np.abs(cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)).sum(axis=1)
+    xs = _peaks(col, peaks_per_axis, max(8, w // 40))
+    ys = _peaks(row, peaks_per_axis, max(8, h // 40))
+
+    scored: list[tuple[float, Quad]] = []
+    for i, x0 in enumerate(xs):
+        for x1 in xs[i + 1:]:
+            width = x1 - x0
+            if width < 8:
+                continue
+            for j, y0 in enumerate(ys):
+                for y1 in ys[j + 1:]:
+                    height = y1 - y0
+                    if height < 8 or not (0.60 <= width / height <= 0.84):
+                        continue
+                    area = float(width * height)
+                    if area < min_area or area > max_area:
+                        continue
+                    strength = float(col[x0] + col[x1] + row[y0] + row[y1])
+                    scored.append((strength, Quad(np.array(
+                        [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32))))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    return [q for _, q in scored[:max_quads]]
+
+
+def axis_aligned(quad: Quad) -> Quad:
+    """The quad's bounding box as a quad.
+
+    Cards on a screen are nearly always upright rectangles, so when the contour step
+    returns a slightly tilted or ragged outline its bounding box is often the better
+    reading. Offered as an extra candidate rather than a replacement, since a photographed
+    card genuinely does need the perspective transform.
+    """
+    x0, y0, x1, y1 = quad.bbox
+    return Quad(np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32))
 
 
 def whole_frame_quad(frame: np.ndarray) -> Quad:

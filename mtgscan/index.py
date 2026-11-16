@@ -336,9 +336,18 @@ class HashIndex:
         return self._select("id = ?", (card_id,))
 
     def unique_names(self) -> list[str]:
+        """Distinct card names for title matching, excluding tokens and emblems.
+
+        A token often carries the short form of a real card's name ("Ragavan" for
+        "Ragavan, Nimble Pilferer"), so a partially read title matches the token exactly
+        and the wrong card is reported with full confidence.
+        """
         if self._names is None:
             with self._lock:
-                rows = self.con.execute("SELECT DISTINCT face_name FROM cards WHERE face_name != ''").fetchall()
+                rows = self.con.execute(
+                    "SELECT DISTINCT face_name FROM cards WHERE face_name != '' "
+                    "AND layout NOT IN ('token', 'double_faced_token', 'emblem') "
+                    "AND set_type != 'token'").fetchall()
             self._names = [r[0] for r in rows]
         return self._names
 

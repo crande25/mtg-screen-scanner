@@ -4,6 +4,41 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### Fixed (2026-11-16, first real-screen testing)
+- **Selecting a region produced nothing at all, with no error.** The OCR fallback passed a
+  numpy array through `or`, which raises, and the per-card handler swallowed it, so every
+  card vanished and the table stayed empty. Fixed, and a card that fails now appears as a row
+  carrying the error instead of disappearing.
+- The status bar now explains an empty result (no card shapes, nothing matched, or the error),
+  rather than only counting shapes.
+- **A wrong card could be reported with confidence.** A partially read title matched a token
+  card of the same short name ("Ragavan" for "Ragavan, Nimble Pilferer"). Tokens and emblems
+  are now excluded from title matching, whole-string scoring replaced substring scoring, and
+  very short reads are ignored. For a tool that quotes prices, no answer beats a wrong one.
+- **Cards on a dark background were not found.** A card's black border against a dark
+  backdrop is a very weak edge, so the contour step returned a lopsided quad spanning the
+  frame, and the hash is intolerant of a few percent of misalignment. On a real screen this
+  meant nothing was identified unless the region was drawn exactly on the card.
+
+### Internal (2026-11-16, detection)
+- `detect.quad_is_sane()` rejects quads whose opposite sides differ by more than 20% or whose
+  corners stray outside 55-125 degrees; the aspect test alone averaged opposite sides and let
+  skewed noise through. `find_cards` gained a CLAHE-equalised, low-threshold Canny pass for
+  weak edges.
+- `detect.projection_quads()` finds upright cards by projecting Sobel energy onto each axis
+  and pairing peaks whose spacing matches 63:88. Summing along whole rows and columns
+  accumulates an edge too weak for per-pixel thresholding. `detect.axis_aligned()` offers a
+  quad's bounding box as an alternative reading.
+- `identify.identify_card()` now tries several geometries and lets the hash choose. Fallback
+  order in `identify_frame`: detected quads, then the whole frame when card-shaped, then
+  `_projection_fallback()` (projection peaks land on the card's inner frame, so a short
+  outward expansion is searched, 4 steps x 3 candidates, one index search each), then the
+  title. Measured on a real screen: distance 169 before the expansion, 77 after, against an
+  accept threshold of 112.
+- Title matching moved out of `identify_card` into a once-per-frame step that runs only when
+  no geometry matched; previously it ran per card and its wrong answer masked the correct one
+  the later fallbacks would have found. `HashIndex.unique_names()` excludes tokens.
+
 ### Repository (2026-11-16)
 - Published to GitHub as a public repository under the Apache License 2.0 (`LICENSE`).
 - README gained License, and Attribution and data use, sections recording that card data and

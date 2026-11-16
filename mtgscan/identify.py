@@ -14,7 +14,8 @@ import cv2
 import numpy as np
 
 from .config import HASH_BITS, MATCH_ACCEPT, MATCH_STRONG, SAME_ART_DELTA, WARP_H, WARP_W
-from .detect import Quad, find_cards, warp_card, whole_frame_quad
+from .detect import (Quad, axis_aligned, find_cards, looks_like_card, projection_quads,
+                     warp_card, whole_frame_quad)
 from .hashing import card_hash
 from .index import HashIndex
 from .ocr import Ocr, printing_similarity, read_collector_line, read_title
@@ -35,6 +36,12 @@ OCR_MIN_SCORE = 1.0
 # scores exactly (1.0-0.9)*SET + (1.0-0.85)*NUMBER = 0.45 below the base printing. Nothing in
 # the image separates them, so the margin sits just above that and the hash keeps the call.
 OCR_TIE_MARGIN = 0.5
+MIN_TITLE_CHARS = 6          # shorter reads are too easy to match to the wrong card
+# Outward steps from a projection candidate's inner frame to the card's true edge, as a
+# fraction of the candidate's width and height. Measured on screen captures; the vertical
+# step is larger because the card's bottom edge is weaker than its text box.
+PROJECTION_EXPANSIONS = ((0.0, 0.0), (0.04, 0.04), (0.04, 0.08), (0.07, 0.12))
+PROJECTION_MAX_QUADS = 3
 
 
 @dataclass
@@ -88,32 +95,89 @@ class Identifier:
         out = []
         for q in quads:
             try:
-                out.append(self.identify_card(frame, q))
+                out.append(self.identify_card(frame, q, allow_name_fallback=False))
             except Exception as e:  # keep scanning the other cards
+                # Never drop the card silently: a vanished row looks to the user like the
+                # scanner did nothing at all, which hides the failure completely.
                 log.exception("identify failed: %s", e)
+                out.append(Detection(quad=q, image=np.zeros((1, 1, 3), np.uint8),
+                                     note=f"error: {type(e).__name__}: {e}"))
+
+        # Last resort: if detection found nothing usable but the region is itself card
+        # shaped, the user has probably drawn it around a single card, so read it as one.
+        if not single_card and not any(d.card for d in out) and looks_like_card(frame):
+            try:
+                whole = self.identify_card(frame, whole_frame_quad(frame), allow_name_fallback=False)
+                if whole.card is not None:
+                    whole.note = (whole.note + "; " if whole.note else "") + "read as a single card"
+                    out = [whole]
+            except Exception as e:
+                log.exception("whole-frame fallback failed: %s", e)
+
+        if not any(d.card for d in out):
+            try:
+                recovered = self._projection_fallback(frame)
+                if recovered is not None:
+                    det = self.identify_card(frame, recovered, allow_name_fallback=False)
+                    if det.card is not None:
+                        det.note = (det.note + "; " if det.note else "") + "found by edge projection"
+                        out = [det]
+            except Exception as e:
+                log.exception("projection fallback failed: %s", e)
+
+        # Reading the title is the last resort, tried once per frame and only when no
+        # geometry matched by hash. It used to run per card before the fallback above had
+        # its turn, and a partial read then supplied a wrong card that masked the good
+        # answer the whole-frame pass would have found.
+        if self.ocr is not None and out and not any(d.card for d in out):
+            for det in out:
+                if det.note.startswith("error:"):
+                    continue
+                try:
+                    self._fallback_ocr_name(det, frame)
+                except Exception as e:
+                    log.exception("title fallback failed: %s", e)
+                if det.card is not None:
+                    break
+
         out.sort(key=lambda d: (d.quad.bbox[1] // 40, d.quad.bbox[0]))
         return out
 
     # --- card level ---------------------------------------------------------------
 
-    def identify_card(self, frame: np.ndarray, quad: Quad) -> Detection:
-        img = warp_card(frame, quad)
-        det = Detection(quad=quad, image=img)
+    def identify_card(self, frame: np.ndarray, quad: Quad, allow_name_fallback: bool = True) -> Detection:
+        # Detection proposes, hashing decides. A contour can come back slightly tilted or
+        # ragged while its bounding box is the true card, and the hash is intolerant of
+        # even a few percent of misalignment, so both readings are tried and the better
+        # match wins rather than trusting the contour outright.
+        geometries = [quad]
+        aligned = axis_aligned(quad)
+        if not np.allclose(aligned.pts, quad.pts, atol=1.5):
+            geometries.append(aligned)
 
-        best = self._best_orientation(img)
-        if best is None:
-            det.note = "empty index"
-            return det
-        img, matches, rotated = best
-        det.image = img
-        det.rotated = rotated
+        best: Optional[tuple[int, np.ndarray, list[tuple[int, int]], bool, Quad]] = None
+        for geom in geometries:
+            attempt = self._best_orientation(warp_card(frame, geom))
+            if attempt is None:
+                det = Detection(quad=quad, image=warp_card(frame, quad))
+                det.note = "empty index"
+                return det
+            geom_img, geom_matches, geom_rotated = attempt
+            distance = geom_matches[0][1] if geom_matches else 1 << 30
+            if best is None or distance < best[0]:
+                best = (distance, geom_img, geom_matches, geom_rotated, geom)
+
+        assert best is not None
+        _, img, matches, rotated, chosen = best
+        det = Detection(quad=chosen, image=img, rotated=rotated)
 
         accept = MATCH_ACCEPT * HASH_BITS
         if matches and matches[0][1] <= accept:
             self._resolve_hash_match(det, matches, frame)
         else:
             det.note = f"no hash match (best d={matches[0][1] if matches else 'n/a'})"
-            self._fallback_ocr_name(det, frame)
+            if allow_name_fallback:
+                self._fallback_ocr_name(det, frame)
         return det
 
     def _best_orientation(self, img: np.ndarray):
@@ -129,6 +193,39 @@ class Identifier:
         if m2 and (not m or m2[0][1] < m[0][1]):
             return rot, m2, True
         return img, m, False
+
+    def _projection_fallback(self, frame: np.ndarray) -> Optional[Quad]:
+        """Recover an upright card the contour step missed, using edge projections.
+
+        Projection peaks land on the card's *inner* frame, because the border-to-artwork
+        edge is far stronger than the card's outer edge against a dark background. The
+        true edge is therefore a short step outside, measured at roughly 4% horizontally
+        and 8% vertically, the extra height being the text box bottom masking the card
+        bottom. A few expansions are tried and the hash picks the winner, so the geometry
+        never has to be right first time.
+
+        Costs one index search per variant, so it runs only when nothing else matched.
+        """
+        h, w = frame.shape[:2]
+        area = float(h * w)
+        quads = projection_quads(frame, area * 0.003, area * 0.985,
+                                 max_quads=PROJECTION_MAX_QUADS)
+        best: Optional[tuple[int, Quad]] = None
+        for quad in quads:
+            x0, y0, x1, y1 = quad.bbox
+            qw, qh = x1 - x0, y1 - y0
+            for ex, ey in PROJECTION_EXPANSIONS:
+                dx, dy = qw * ex, qh * ey
+                grown = Quad(np.array([[x0 - dx, y0 - dy], [x1 + dx, y0 - dy],
+                                       [x1 + dx, y1 + dy], [x0 - dx, y1 + dy]], dtype=np.float32))
+                matches = self.index.query(card_hash(warp_card(frame, grown)), k=1)
+                if not matches:
+                    continue
+                if best is None or matches[0][1] < best[0]:
+                    best = (matches[0][1], grown)
+        if best is None or best[0] > MATCH_ACCEPT * HASH_BITS:
+            return None
+        return best[1]
 
     def _ocr_image(self, frame: np.ndarray, det: Detection) -> Optional[np.ndarray]:
         """The card re-warped large enough for the printed collector line to be legible.
@@ -212,8 +309,10 @@ class Identifier:
     def _fallback_ocr_name(self, det: Detection, frame: np.ndarray) -> None:
         if self.ocr is None:
             return
-        title = read_title(self.ocr, self._ocr_image(frame, det) or det.image)
-        if len(title) < 3:
+        # `or` would ask numpy for an array's truth value, which raises.
+        ocr_img = self._ocr_image(frame, det)
+        title = read_title(self.ocr, det.image if ocr_img is None else ocr_img)
+        if len(title) < MIN_TITLE_CHARS:
             return
         try:
             from rapidfuzz import fuzz, process
@@ -222,7 +321,11 @@ class Identifier:
         names = self.index.unique_names()
         if not names:
             return
-        hit = process.extractOne(title, names, scorer=fuzz.WRatio, score_cutoff=82)
+        # Whole-string ratio, not WRatio: the latter rewards substrings, so a title read as
+        # just "Ragavan" scored highly against the token card of that name and returned the
+        # wrong printing with no warning. For a tool that quotes prices, returning nothing
+        # is better than returning a confident wrong card.
+        hit = process.extractOne(title, names, scorer=fuzz.ratio, score_cutoff=88)
         if not hit:
             det.note += f"; title OCR '{title}' matched nothing"
             return

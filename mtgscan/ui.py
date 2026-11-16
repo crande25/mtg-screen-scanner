@@ -606,8 +606,23 @@ class ScannerApp:
             self.prices.request(d.card, lambda c, q: self.events.put(("price", c, q)))
         self._last_ids = ids_now
         self._refresh_history()
+        self._update_status(self._scan_summary(dets, secs))
+
+    @staticmethod
+    def _scan_summary(dets: list[Detection], secs: float) -> str:
+        """Say what the scan actually found, so an empty table is never unexplained."""
+        took = f"in {secs * 1000:.0f} ms"
+        errors = [d for d in dets if d.note.startswith("error:")]
+        if errors:
+            return f"Last scan: {errors[0].note} ({len(errors)} failed) {took}"
+        if not dets:
+            return ("Last scan: no card shapes found in the region " + took +
+                    ". If the region is drawn around a single card, tick 'Region is one card'.")
         found = sum(1 for d in dets if d.card)
-        self._update_status(f"Last scan: {len(dets)} card shape(s), {found} identified in {secs * 1000:.0f} ms")
+        if found == 0:
+            return (f"Last scan: {len(dets)} card shape(s), none matched the index {took}. "
+                    "Try a larger region, or build the index for this card's set.")
+        return f"Last scan: {len(dets)} card shape(s), {found} identified {took}"
 
     def _on_price(self, card: CardRecord, quote: PriceQuote):
         e = self.history.get(card.id)

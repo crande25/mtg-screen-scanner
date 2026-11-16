@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 
 from mtgscan import scryfall
-from mtgscan.identify import Identifier
+from mtgscan.detect import whole_frame_quad
+from mtgscan.identify import Detection, Identifier
 from mtgscan.index import BuildOptions, HashIndex, build_index
 from mtgscan.pricing import ScryfallMarketProvider
 from tests.test_detect import paste, paste_perspective
@@ -93,6 +94,86 @@ def test_unrelated_image_is_not_identified(small_index):
     noise = rng.integers(0, 255, (408, 292, 3), dtype=np.uint8)
     dets = Identifier(small_index, ocr=None).identify_frame(noise, single_card=True)
     assert dets and dets[0].card is None, (dets[0].name, dets[0].distance)
+
+
+class _StubOcr:
+    """Stands in for RapidOCR so these tests run without the engine installed."""
+
+    available = True
+
+    def __init__(self, lines=()):
+        self._lines = list(lines)
+
+    def lines(self, img):
+        assert img is not None and img.size > 0
+        return self._lines
+
+
+def test_ocr_fallback_on_an_unmatched_card_does_not_raise(small_index):
+    """Regression: the fallback passed a numpy array through `or`, which raises.
+
+    It needs all three conditions at once -- OCR enabled, no hash match, and a card big
+    enough to be re-warped for OCR -- and the error was swallowed per card, so the only
+    symptom was an empty table with no message.
+    """
+    rng = np.random.default_rng(3)
+    noise = rng.integers(0, 255, (816, 584, 3), dtype=np.uint8)   # unmatchable, and large
+    dets = Identifier(small_index, _StubOcr(), use_ocr=True).identify_frame(noise, single_card=True)
+    assert len(dets) == 1
+    assert dets[0].card is None
+    assert not dets[0].note.startswith("error:"), dets[0].note
+
+
+def test_a_failing_card_is_reported_not_dropped(small_index, monkeypatch):
+    """A card that blows up must still appear, so the failure is visible to the user."""
+    ident = Identifier(small_index, ocr=None)
+    monkeypatch.setattr(ident, "identify_card",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    dets = ident.identify_frame(np.zeros((408, 292, 3), np.uint8), single_card=True)
+    assert len(dets) == 1 and dets[0].card is None
+    assert dets[0].note == "error: RuntimeError: boom"
+
+
+def test_card_on_a_dark_background_with_margin_is_found(small_index):
+    """Regression: the case that failed on a real screen.
+
+    A card's black border against a dark background is a very weak edge, so the contour
+    step returns a skewed quad spanning the frame and the hash, which is intolerant of a
+    few percent of misalignment, finds nothing. The edge-projection fallback recovers it.
+    """
+    rec = _pick(small_index, 3)[1]
+    card = _normal_image(rec)
+    margin = 60
+    h, w = card.shape[:2]
+    frame = np.full((h + 2 * margin, w + 2 * margin, 3), (34, 36, 42), np.uint8)  # dark, as on screen
+    frame[margin:margin + h, margin:margin + w] = card
+
+    dets = Identifier(small_index, ocr=None).identify_frame(frame)
+    assert any(d.card for d in dets), [d.note for d in dets]
+    assert any(d.card.id == rec.id for d in dets if d.card), \
+        [(d.card.name, d.distance) for d in dets if d.card]
+
+
+def test_skewed_quads_are_rejected():
+    from mtgscan.detect import quad_is_sane
+
+    upright = np.array([[60, 60], [547, 60], [547, 739], [60, 739]], np.float32)
+    assert quad_is_sane(upright)
+    # a mild perspective view of a card is still acceptable
+    tilted = np.array([[64, 58], [549, 66], [543, 737], [58, 731]], np.float32)
+    assert quad_is_sane(tilted)
+    # the real failure: a lopsided quad whose averaged sides looked card-shaped
+    skewed = np.array([[36, 86], [607, 39], [518, 718], [89, 724]], np.float32)
+    assert not quad_is_sane(skewed)
+
+
+def test_scan_summary_explains_an_empty_result():
+    from mtgscan.ui import ScannerApp
+
+    assert "no card shapes found" in ScannerApp._scan_summary([], 0.01).lower()
+    err = Detection(quad=whole_frame_quad(np.zeros((10, 10, 3), np.uint8)),
+                    image=np.zeros((1, 1, 3), np.uint8), note="error: RuntimeError: boom")
+    assert "boom" in ScannerApp._scan_summary([err], 0.01)
 
 
 def test_scryfall_price_provider(small_index):
