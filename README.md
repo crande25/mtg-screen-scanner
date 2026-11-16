@@ -145,11 +145,22 @@ market price automatically when a source has nothing for a card or is down.
 | TCGplayer low + market (tcgcsv.com, daily) | TCGplayer's lowest listing, any condition | TCGplayer market | **Default.** [tcgcsv.com](https://tcgcsv.com) mirrors the official TCGplayer price points daily and is free to use. Needs no keys. One request per set, cached an hour. |
 | TCGplayer market only (Scryfall, daily) | none | TCGplayer market | What Scryfall's `usd`/`usd_foil` are: the market price, synced every 24 hours ([Scryfall FAQ](https://scryfall.com/docs/faqs/where-do-scryfall-prices-come-from-7)). |
 | TCGplayer lowest Near Mint (official API) | lowest Near Mint listing per finish | NM market | Needs a TCGplayer API key pair (**API keys...**). TCGplayer rarely issues keys any more; written from the public docs, untested without keys. |
-| TCGplayer lowest Near Mint (website data) | lowest Near Mint listing per finish | none | Unofficial, unverified, opt-in: shape follows community tooling and can break or be refused. |
+| TCGplayer lowest Near Mint (website data) | lowest Near Mint listing per finish | none | **Does not work: TCGplayer answers these requests with HTTP 403.** Kept in case that changes; the app falls back to the market price and says so in the status bar. |
 
-Condition note: a Near Mint-only lowest price exists only at TCGplayer's SKU level, which the
-last two modes use. TCGplayer's best grade is Near Mint (there is no "Mint"). Cards without a
-foil printing show `n/a` in the foil columns.
+Condition note: a Near Mint-only lowest price exists only at TCGplayer's SKU level. TCGplayer's
+best grade is Near Mint (there is no "Mint"). Cards without a foil printing show `n/a` in the
+foil columns.
+
+### Getting a Near Mint price
+
+TCGplayer refuses automated requests for its listings data, and getting past that would mean
+impersonating a browser, which this project will not do. The Near Mint figure is one click
+away instead: **Open Near Mint on TCGplayer**, or double-clicking a row, opens the product
+page already filtered to English Near Mint in the normal printing, and **Near Mint foil** does
+the same for foil. The lowest Near Mint price is then the first figure on the page.
+
+The gap is real but modest. For Lightning Bolt (M10) the any-condition low is $0.74 while the
+Near Mint low is $0.89.
 
 Check any card from the command line (add `--modes` to pick sources):
 

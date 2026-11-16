@@ -14,12 +14,32 @@ from mtgscan.identify import Identifier, TemporalVoter
 from mtgscan.scryfall import CardRecord
 
 
-def _card(card_id="a", name="Test Card", illustration="art-1") -> CardRecord:
+def _card(card_id="a", name="Test Card", illustration="art-1", tcgplayer_id=None,
+          finishes="") -> CardRecord:
     values = {f: "" for f in CardRecord.columns()}
     values.update(id=card_id, face=0, name=name, face_name=name, illustration_id=illustration,
-                  tcgplayer_id=None, tcgplayer_etched_id=None, promo=0, digital=0,
-                  usd=None, usd_foil=None, usd_etched=None)
+                  tcgplayer_id=tcgplayer_id, tcgplayer_etched_id=None, promo=0, digital=0,
+                  finishes=finishes, usd=None, usd_foil=None, usd_etched=None)
     return CardRecord(**values)
+
+
+class TestListingLinks:
+    """The Near Mint price is reached by opening the page, since TCGplayer refuses
+    automated requests for its listings data (it answers them with HTTP 403)."""
+
+    def test_the_link_is_filtered_to_near_mint(self):
+        card = _card(tcgplayer_id=32656, finishes="nonfoil,foil")
+        url = card.tcgplayer_listing_url()
+        assert url.startswith("https://www.tcgplayer.com/product/32656?")
+        assert "Condition=Near+Mint" in url and "Printing=Normal" in url
+        assert "Language=English" in url
+
+    def test_the_foil_link_selects_the_foil_printing(self):
+        url = _card(tcgplayer_id=32656, finishes="nonfoil,foil").tcgplayer_listing_url(foil=True)
+        assert "Printing=Foil" in url and "Condition=Near+Mint" in url
+
+    def test_a_card_without_a_product_id_has_no_link(self):
+        assert _card().tcgplayer_listing_url() == ""
 
 
 class TestAcceptance:

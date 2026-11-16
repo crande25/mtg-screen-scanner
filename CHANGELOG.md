@@ -4,6 +4,23 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### User-facing (2026-11-16, Near Mint prices)
+- **Opening a card goes straight to its Near Mint listings.** "Open Near Mint on TCGplayer",
+  and double-clicking a row, now open the product page already filtered to English Near Mint
+  in the normal printing; a second button does the same for foil. Verified against a live
+  page: all listings shown are Near Mint, and the lowest is the first figure on it.
+- **The status bar says when a price source has been refused**, instead of the Low columns
+  showing a bare dash with the reason hidden behind clicking a row.
+- The unofficial website price mode is documented as not working: TCGplayer answers those
+  requests with HTTP 403. It is kept in case that changes, and the app falls back to the
+  market price. Getting past that block would mean impersonating a browser, which this
+  project does not do, so the Near Mint price is reached by opening the page instead.
+
+### Internal (2026-11-16, Near Mint prices)
+- `CardRecord.tcgplayer_listing_url(foil=False)` builds the filtered product URL;
+  `ScannerApp._selected_card()` and `open_selected(history, foil)` replace the single
+  open handler; `_price_fallback_note()` surfaces a provider fallback in the status bar.
+
 ### User-facing (2026-11-16, index and diagnosis)
 - **A prebuilt index can be downloaded instead of built.** About 21 MB, installed in roughly
   ten seconds, against about ninety minutes of hashing ~107k thumbnails. Available as

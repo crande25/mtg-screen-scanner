@@ -250,6 +250,20 @@ class CardRecord:
     def has_nonfoil(self) -> bool:
         return "nonfoil" in self.finishes.split(",")
 
+    def tcgplayer_listing_url(self, foil: bool = False) -> str:
+        """The product page already filtered to English Near Mint, in one finish.
+
+        TCGplayer refuses automated requests for its listings data, and working around
+        that would mean impersonating a browser, so the Near Mint lowest price is reached
+        the way the site intends: a person opening the page. Pre-filtering means the
+        figure is the first thing on screen rather than several clicks in.
+        """
+        base = self.tcgplayer_product_url
+        if not base:
+            return ""
+        printing = "Foil" if foil else "Normal"
+        return f"{base}?Language=English&Condition=Near+Mint&Printing={printing}"
+
     @property
     def tcgplayer_product_url(self) -> str:
         if self.tcgplayer_id:

@@ -389,7 +389,10 @@ class ScannerApp:
 
         actions = ttk.Frame(left)
         actions.pack(fill="x", pady=(4, 0))
-        ttk.Button(actions, text="Open on TCGplayer", command=self.open_selected).pack(side="left")
+        ttk.Button(actions, text="Open Near Mint on TCGplayer",
+                   command=self.open_selected).pack(side="left")
+        ttk.Button(actions, text="Near Mint foil",
+                   command=lambda: self.open_selected(foil=True)).pack(side="left", padx=6)
         ttk.Button(actions, text="Export history CSV...", command=self.export_csv).pack(side="left", padx=6)
         ttk.Button(actions, text="Clear history", command=self.clear_history).pack(side="left")
 
@@ -684,7 +687,24 @@ class ScannerApp:
         summary = self._scan_summary(scanned, secs, bool(self.settings.get("single_card")))
         if self.held_for is not None:
             summary += f"  Holding the last agreed card, seen {self.held_for:.0f}s ago."
+        fallback = self._price_fallback_note()
+        if fallback:
+            summary += f"  Prices: {fallback}"
         self._update_status(summary)
+
+    def _price_fallback_note(self) -> str:
+        """Why the chosen price source is not the one answering.
+
+        A blocked source left the Low columns showing a bare dash, with the reason only
+        visible after clicking a row.
+        """
+        for det in self.current:
+            if not det.card:
+                continue
+            quote = self.prices.cached(det.card)
+            if quote is not None and quote.note.startswith("fallback"):
+                return quote.note
+        return ""
 
     @staticmethod
     def _scan_summary(dets: list[Detection], secs: float, single_card: bool = False) -> str:
@@ -794,16 +814,27 @@ class ScannerApp:
         self._refresh_history()
         self._on_select()
 
-    def open_selected(self, history: bool = False):
-        url = ""
+    def _selected_card(self, history: bool = False) -> Optional[CardRecord]:
         if history:
             sel = self.hist.selection()
-            if sel and sel[0] in self.history:
-                url = self.history[sel[0]].card.tcgplayer_product_url
-        else:
-            d = self._selected_detection()
-            if d and d.card:
-                url = d.card.tcgplayer_product_url
+            return self.history[sel[0]].card if sel and sel[0] in self.history else None
+        d = self._selected_detection()
+        return d.card if d and d.card else None
+
+    def open_selected(self, history: bool = False, foil: bool = False):
+        """Open the card on TCGplayer, filtered to English Near Mint in one finish.
+
+        The Near Mint lowest price cannot be fetched directly: TCGplayer refuses automated
+        requests for its listings. Opening the filtered page puts that figure in front of
+        you immediately, with the site doing the serving it intends to do.
+        """
+        card = self._selected_card(history)
+        if card is None:
+            return
+        if foil and not (card.has_foil or "etched" in card.finishes):
+            messagebox.showinfo("No foil printing", f"{card.name} was not printed in foil.", parent=self.root)
+            return
+        url = card.tcgplayer_listing_url(foil=foil) or card.tcgplayer_product_url
         if url:
             webbrowser.open(url)
 
