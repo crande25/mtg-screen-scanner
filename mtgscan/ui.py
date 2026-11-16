@@ -24,7 +24,7 @@ from .capture import ScreenCapture
 from .config import MATCH_STRONG, data_dir
 from .hashing import frame_signature, frames_differ
 from .identify import Detection, Identifier, TemporalVoter, draw_detections
-from .index import BuildOptions, HashIndex, Progress, build_index
+from .index import BuildOptions, HashIndex, Progress, build_index, bundle_url, import_bundle
 from .ocr import Ocr
 from .pricing import MODES, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService, keys_from_env
 from .scryfall import CardRecord
@@ -141,32 +141,57 @@ class BuildDialog(tk.Toplevel):
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="The index hashes one Scryfall image per printing. A full build downloads\n"
-                            "~100k small images at Scryfall's rate limit and takes a few hours; it is\n"
-                            "resumable and later runs only add new printings.", justify="left").grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="Fastest: download the prebuilt index, about 21 MB, ready in under a minute.\n"
+                            "Building instead hashes one Scryfall image per printing, downloading ~100k\n"
+                            "thumbnails at Scryfall's rate limit, which takes about an hour and a half.",
+                  justify="left").grid(row=0, column=0, columnspan=3, sticky="w")
+        self.fetch_btn = ttk.Button(frm, text="Download prebuilt index", command=self.fetch)
+        self.fetch_btn.grid(row=1, column=0, sticky="w", pady=(6, 10))
+        ttk.Label(frm, text="covers every printing up to the release date", foreground="#555").grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(6, 10))
+        ttk.Separator(frm, orient="horizontal").grid(row=2, column=0, columnspan=3, sticky="we", pady=(0, 8))
         self.scope = tk.StringVar(value="since")
-        ttk.Radiobutton(frm, text="Everything (all paper printings)", variable=self.scope, value="all").grid(row=1, column=0, columnspan=3, sticky="w")
-        ttk.Radiobutton(frm, text="Printings released since year", variable=self.scope, value="since").grid(row=2, column=0, sticky="w")
+        ttk.Radiobutton(frm, text="Everything (all paper printings)", variable=self.scope, value="all").grid(row=3, column=0, columnspan=3, sticky="w")
+        ttk.Radiobutton(frm, text="Printings released since year", variable=self.scope, value="since").grid(row=4, column=0, sticky="w")
         self.year = tk.StringVar(value=str(dt.date.today().year - 3))
-        ttk.Spinbox(frm, from_=1993, to=dt.date.today().year, textvariable=self.year, width=6).grid(row=2, column=1, sticky="w")
-        ttk.Radiobutton(frm, text="Only these set codes (comma separated)", variable=self.scope, value="sets").grid(row=3, column=0, sticky="w")
+        ttk.Spinbox(frm, from_=1993, to=dt.date.today().year, textvariable=self.year, width=6).grid(row=4, column=1, sticky="w")
+        ttk.Radiobutton(frm, text="Only these set codes (comma separated)", variable=self.scope, value="sets").grid(row=5, column=0, sticky="w")
         self.sets = tk.StringVar(value="")
-        ttk.Entry(frm, textvariable=self.sets, width=28).grid(row=3, column=1, columnspan=2, sticky="w")
+        ttk.Entry(frm, textvariable=self.sets, width=28).grid(row=5, column=1, columnspan=2, sticky="w")
         self.skip_tokens = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm, text="Skip tokens and emblems", variable=self.skip_tokens).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 8))
+        ttk.Checkbutton(frm, text="Skip tokens and emblems", variable=self.skip_tokens).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 8))
 
         self.progress = ttk.Progressbar(frm, length=420, mode="determinate")
-        self.progress.grid(row=5, column=0, columnspan=3, sticky="we", pady=(4, 2))
+        self.progress.grid(row=7, column=0, columnspan=3, sticky="we", pady=(4, 2))
         self.status = ttk.Label(frm, text="")
-        self.status.grid(row=6, column=0, columnspan=3, sticky="w")
+        self.status.grid(row=8, column=0, columnspan=3, sticky="w")
+        ttk.Label(frm, text=f"Folder: {data_dir()}", foreground="#555").grid(
+            row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, columnspan=3, sticky="e", pady=(10, 0))
+        btns.grid(row=9, column=0, columnspan=3, sticky="e", pady=(10, 0))
         self.start_btn = ttk.Button(btns, text="Start", command=self.start)
         self.start_btn.pack(side="left", padx=4)
         ttk.Button(btns, text="Close", command=self.close).pack(side="left", padx=4)
         self.protocol("WM_DELETE_WINDOW", self.close)
+
+    def fetch(self):
+        """Install the published prebuilt index instead of hashing everything locally."""
+        self.fetch_btn.configure(state="disabled")
+        self.start_btn.configure(state="disabled")
+        self.stop_evt.clear()
+
+        def run():
+            try:
+                import_bundle(bundle_url(), data_dir(),
+                              progress=lambda p: self.app.events.put(("build", p)), stop=self.stop_evt)
+            except Exception as e:
+                log.exception("prebuilt index download failed")
+                self.app.events.put(("build", Progress(
+                    "error", 0, 0, f"Could not install the prebuilt index: {e}. You can still build it below.")))
+
+        self.thread = threading.Thread(target=run, name="index-fetch", daemon=True)
+        self.thread.start()
 
     def start(self):
         scope = self.scope.get()
@@ -180,6 +205,7 @@ class BuildDialog(tk.Toplevel):
                 return
             opts.sets = codes
         self.start_btn.configure(state="disabled")
+        self.fetch_btn.configure(state="disabled")
         self.stop_evt.clear()
 
         def run():
@@ -198,8 +224,9 @@ class BuildDialog(tk.Toplevel):
         if p.total:
             self.progress.configure(maximum=p.total, value=p.done)
         self.status.configure(text=p.message)
-        if p.phase in ("done", "error"):
+        if p.phase in ("done", "error", "stopped"):
             self.start_btn.configure(state="normal")
+            self.fetch_btn.configure(state="normal")
 
     def close(self):
         if self.thread and self.thread.is_alive():
@@ -266,6 +293,7 @@ class ScannerApp:
         self.force_scan = threading.Event()
         self.current: list[Detection] = []
         self.voter = TemporalVoter()
+        self.ocr_ready = False
         self.held_for: Optional[float] = None   # seconds since the held card was last seen
         self.history: dict[str, HistoryEntry] = {}
         self._last_ids: set[str] = set()
@@ -278,6 +306,7 @@ class ScannerApp:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.after(100, self._poll_events)
         threading.Thread(target=self._load_index, name="index-load", daemon=True).start()
+        threading.Thread(target=self._load_ocr, name="ocr-load", daemon=True).start()
 
     # -- UI construction ---------------------------------------------------------------
     def _build_ui(self):
@@ -402,8 +431,7 @@ class ScannerApp:
                 self.settings["pricing"] = key
         if self.prices.set_mode(self.settings["pricing"]):
             self._rerequest_prices()
-        if self.index is not None:
-            self.identifier = Identifier(self.index, self.ocr, use_ocr=self.settings["use_ocr"])
+        self._rebuild_identifier()
         save_settings(self.settings)
         self._update_status()
 
@@ -463,32 +491,52 @@ class ScannerApp:
 
     # -- index -------------------------------------------------------------------------
     def _load_index(self):
+        """Load the card index. Deliberately knows nothing about OCR.
+
+        These two used to load together, so anything wrong with OCR took identification
+        down with it and the app went quiet with no index and no explanation.
+        """
         try:
             if not HashIndex.exists():
-                self.events.put(("index", None, None, "No card index yet. Click 'Build / update index...' to create one."))
+                self.events.put(("index", None, "No card index in this folder yet. Click "
+                                                "'Build / update index...' to download a prebuilt one."))
                 return
             idx = HashIndex()
-            ocr = Ocr()
-            self.events.put(("index", idx, ocr, ""))
+            log.info("index loaded: %s", idx.stats())
+            self.events.put(("index", idx, ""))
         except Exception as e:
             log.exception("index load failed")
-            self.events.put(("index", None, None, f"Index failed to load: {e}"))
+            self.events.put(("index", None, f"Index failed to load: {e}"))
 
-    def _on_index(self, idx: Optional[HashIndex], ocr: Optional[Ocr], msg: str):
-        self.index, self.ocr = idx, ocr
-        if idx is not None:
-            self.identifier = Identifier(idx, ocr, use_ocr=self.settings.get("use_ocr", True))
-            self.start_btn.configure(state="normal")
-            if ocr is not None and not ocr.available:
-                self.ocr_chk.configure(state="disabled")
-                self.ocr_var.set(False)        # shown as off, but not saved as a preference
-            else:
-                self.ocr_chk.configure(state="normal")
-                self.ocr_var.set(bool(self.settings.get("use_ocr", True)))
-        else:
-            self.identifier = None
-            self.start_btn.configure(state="disabled")
+    def _load_ocr(self):
+        try:
+            ocr = Ocr()
+        except Exception as e:                       # never let this disturb identification
+            log.exception("OCR load failed")
+            ocr = None
+        log.info("OCR available: %s", bool(ocr and ocr.available))
+        self.events.put(("ocr", ocr))
+
+    def _rebuild_identifier(self):
+        self.identifier = (Identifier(self.index, self.ocr, use_ocr=self.settings.get("use_ocr", True))
+                           if self.index is not None else None)
+
+    def _on_index(self, idx: Optional[HashIndex], msg: str):
+        self.index = idx
+        self._rebuild_identifier()
+        self.start_btn.configure(state="normal" if idx is not None else "disabled")
         self._update_status(msg)
+
+    def _on_ocr(self, ocr: Optional[Ocr]):
+        self.ocr = ocr
+        self.ocr_ready = True
+        available = bool(ocr is not None and ocr.available)
+        # The box reflects whether OCR can be used; the saved preference is untouched when
+        # it cannot, so installing the package later restores the user's own choice.
+        self.ocr_chk.configure(state="normal" if available else "disabled")
+        self.ocr_var.set(bool(self.settings.get("use_ocr", True)) if available else False)
+        self._rebuild_identifier()
+        self._update_status()
 
     def open_build_dialog(self):
         if self.build_dialog is not None and self.build_dialog.winfo_exists():
@@ -544,7 +592,7 @@ class ScannerApp:
         while not self.stop_evt.is_set():
             region = self.settings.get("region")
             ident = self.identifier
-            if region and ident is not None:
+            if region:
                 try:
                     frame = self.capture.grab(tuple(region))
                     sig = frame_signature(frame)
@@ -552,7 +600,12 @@ class ScannerApp:
                         self.force_scan.clear()
                         prev_sig = sig
                         t0 = time.perf_counter()
-                        dets = ident.identify_frame(frame, single_card=bool(self.settings.get("single_card")))
+                        # Still send the frame when there is no index. The preview then
+                        # shows what is being captured instead of staying black, which
+                        # makes the difference between "no index" and "not scanning at
+                        # all" visible rather than something to guess at.
+                        dets = (ident.identify_frame(frame, single_card=bool(self.settings.get("single_card")))
+                                if ident is not None else [])
                         self.events.put(("frame", frame, dets, time.perf_counter() - t0))
                 except Exception as e:
                     log.exception("scan failed")
@@ -578,7 +631,9 @@ class ScannerApp:
                 elif kind == "status":
                     self._update_status(ev[1])
                 elif kind == "index":
-                    self._on_index(ev[1], ev[2], ev[3])
+                    self._on_index(ev[1], ev[2])
+                elif kind == "ocr":
+                    self._on_ocr(ev[1])
                 elif kind == "build":
                     self._on_build(ev[1])
         except queue.Empty:
@@ -804,6 +859,16 @@ class ScannerApp:
         except Exception as e:
             log.warning("preview failed: %s", e)
 
+    def _ocr_state(self) -> str:
+        """Said plainly, because 'off' used to cover four different situations."""
+        if not self.ocr_ready:
+            return "loading"
+        if self.ocr is None or not self.ocr.available:
+            return "not installed"
+        if not self.settings.get("use_ocr", True):
+            return "off"
+        return "on" if (self.identifier and self.identifier.ocr) else "idle"
+
     def _update_status(self, msg: str = ""):
         parts = []
         if self.index is not None:
@@ -811,8 +876,11 @@ class ScannerApp:
             parts.append(f"Index: {st['hashed']:,} printings (prices as of {st['prices_at'][:10] or '?'})")
         else:
             parts.append("Index: none")
-        parts.append("OCR: " + ("on" if (self.identifier and self.identifier.ocr) else "off"))
+        parts.append("OCR: " + self._ocr_state())
         parts.append("Prices: " + MODE_SHORT.get(self.settings.get("pricing", ""), "?"))
+        # The folder is on screen because the app once reported no index while a complete
+        # one sat on disk, and nothing in the window said where it had looked.
+        parts.append(f"Data: {data_dir()}")
         if msg:
             parts.append(msg)
         self.status.configure(text="  |  ".join(parts))
@@ -823,8 +891,30 @@ class ScannerApp:
         self.root.destroy()
 
 
+def setup_logging() -> Path:
+    """Log to the console and to a file in the data folder, and say where that is.
+
+    Diagnosing this app from a description alone was slow because its only output went to
+    a terminal the user did not always have in front of them.
+    """
+    log_path = data_dir() / "mtgscan.log"
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    try:
+        if log_path.exists() and log_path.stat().st_size > 2_000_000:
+            log_path.replace(log_path.with_suffix(".log.1"))
+        handlers.append(logging.FileHandler(log_path, encoding="utf-8"))
+    except OSError:
+        pass                                    # a missing log must never stop the app
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    log.info("mtg-screen-scanner %s starting; python %s", __version__, sys.version.split()[0])
+    log.info("data folder: %s", data_dir())
+    log.info("index present: %s", HashIndex.exists())
+    return log_path
+
+
 def main(argv: Optional[list[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging()
     enable_dpi_awareness()
     root = tk.Tk()
     if sys.platform == "win32":

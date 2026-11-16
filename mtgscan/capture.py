@@ -18,7 +18,9 @@ class ScreenCapture:
     def _mss(self):
         m = getattr(self._local, "m", None)
         if m is None:
-            m = mss.mss()
+            # mss.mss() is deprecated in favour of mss.MSS(); keep working on both.
+            factory = getattr(mss, "MSS", None) or mss.mss
+            m = factory()
             self._local.m = m
         return m
 

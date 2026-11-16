@@ -225,6 +225,7 @@ class CardRecord:
     digital: int
     set_type: str
     image_small: str
+    image_key: str          # image_small without its cache-busting query: stable across rebuilds
     image_normal: str
     usd: Optional[float]
     usd_foil: Optional[float]
@@ -254,6 +255,17 @@ class CardRecord:
         if self.tcgplayer_id:
             return f"https://www.tcgplayer.com/product/{self.tcgplayer_id}"
         return self.tcgplayer_uri or ""
+
+
+def image_key(url: str) -> str:
+    """An image URL without its query string.
+
+    Scryfall appends a cache-busting timestamp (`...jpg?1783942371`) that changes when a
+    bulk export is regenerated, even though the picture is the same. Keying stored hashes
+    on the raw URL therefore invalidated the whole index on every refresh and forced a
+    full re-download. The image serves fine without the query.
+    """
+    return (url or "").split("?", 1)[0]
 
 
 def _price(v) -> Optional[float]:
@@ -301,6 +313,7 @@ def records_from_card(card: dict, prices_at: str = "") -> list[CardRecord]:
             digital=1 if card.get("digital") else 0,
             set_type=card.get("set_type", ""),
             image_small=uris.get("small", ""),
+            image_key=image_key(uris.get("small", "")),
             image_normal=uris.get("normal", ""),
             usd=_price(prices.get("usd")),
             usd_foil=_price(prices.get("usd_foil")),

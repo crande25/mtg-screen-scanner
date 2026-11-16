@@ -61,7 +61,27 @@ Optional OCR (set disambiguation and title fallback), a plain pip package with b
 uv pip install --python .venv/Scripts/python.exe rapidocr-onnxruntime
 ```
 
-## Build the card index (once)
+## Get the card index (once)
+
+The quickest route is the prebuilt index, about 21 MB, which installs in well under a minute:
+
+```bash
+.venv/Scripts/python.exe build_index.py --import-bundle
+```
+
+The same thing is in the app under **Build / update index... > Download prebuilt index**. It
+carries 512-bit image hashes and Scryfall card data, never card images. Afterwards an ordinary
+build only fetches printings released since the bundle was made.
+
+To see what a build would do before it downloads anything:
+
+```bash
+.venv/Scripts/python.exe build_index.py --plan
+```
+
+That prints the data folder, how many printings are current, and how many need downloading.
+
+## Build the card index yourself
 
 Card data comes from Scryfall's daily bulk dump (`default_cards`, an 81 MB gzipped JSON-lines
 file, no API calls). What takes time is the images: the index hashes one 146x204 thumbnail
@@ -83,8 +103,18 @@ you only care about recent sets:
 ```
 
 The same options are in the app under **Build / update index...**. Re-run any time to pick up
-new sets and refresh the bundled daily prices. Data lives in `%LOCALAPPDATA%\mtg-screen-scanner`
-(`cards.sqlite`, `hashes.npy`); set `MTGSCAN_DATA_DIR` to move it.
+new sets and refresh the bundled daily prices; only printings whose picture is new are
+downloaded again, so a refresh is quick. Stopping a build keeps the index you already had.
+
+Data lives in `%LOCALAPPDATA%\mtg-screen-scanner` (`cards.sqlite`, `hashes.npy`, and
+`mtgscan.log`); set `MTGSCAN_DATA_DIR` to move it. The app shows the folder it is using in the
+status bar and in the build dialog, and writes the same to the log at startup.
+
+To publish your own index for others, or to move one between machines:
+
+```bash
+.venv/Scripts/python.exe build_index.py --export-bundle card-index.mtgidx
+```
 
 ## Run
 

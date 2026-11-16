@@ -26,7 +26,8 @@ def test_app_handles_a_frame(small_index, tmp_path, monkeypatch):
     for _ in range(20):
         root.update()
         time.sleep(0.05)
-    app._on_index(small_index, None, "")
+    app._on_index(small_index, "")
+    app._on_ocr(None)
     assert app.identifier is not None
 
     recs = _pick(small_index, 2)

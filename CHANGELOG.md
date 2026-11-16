@@ -4,6 +4,47 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### User-facing (2026-11-16, index and diagnosis)
+- **A prebuilt index can be downloaded instead of built.** About 21 MB, installed in roughly
+  ten seconds, against about ninety minutes of hashing ~107k thumbnails. Available as
+  **Build / update index... > Download prebuilt index** or `build_index.py --import-bundle`.
+  It carries hashes and card data only, never card images.
+- **Refreshing the index no longer re-downloads every image.** Hashes were keyed on the image
+  URL, which carries a cache-busting timestamp that changes on every Scryfall bulk export, so
+  a refresh invalidated all ~107k hashes and started again from nothing. Only a card whose
+  picture actually changed is re-hashed now.
+- **Stopping a build keeps the index you already had**, instead of publishing its partial
+  hashes over a complete one.
+- `build_index.py --plan` reports the data folder, what is current and what needs downloading,
+  without downloading anything. `--export-bundle` publishes an index for other machines.
+- **The window now says where it is looking.** The data folder appears in the status bar and
+  the build dialog, and a log is written to `mtgscan.log` in that folder recording the folder,
+  whether an index was found, and whether OCR loaded.
+- **The preview shows the captured region even with no index loaded**, so a black preview no
+  longer means "no index", "not scanning" and "capture is broken" at once.
+- **The OCR indicator distinguishes its states**: loading, not installed, off, idle, on. It
+  previously read "off" for all of them, including when OCR was working.
+- OCR loads independently of the index, so an OCR problem can no longer leave the app with no
+  index and no explanation.
+
+### Internal (2026-11-16, index and diagnosis)
+- `scryfall.image_key()` strips the query from an image URL; `CardRecord.image_key` stores it.
+  `cards.hash_key` records the picture each hash was computed from, and `index.STALE_HASH_SQL`
+  (`hash IS NULL OR hash_key IS NOT image_key`) is the single definition of a stale hash, used
+  by the build, the export and the planner. The upsert no longer touches hashes at all.
+- `index._migrate()` adds columns to an older database and backfills `image_key`/`hash_key` so
+  existing hashes survive an upgrade; `HashIndex` migrates on open.
+- `index.restore_hashes_from_arrays()` repairs a database that lost its hashes from the
+  exported arrays, and the build calls it before downloading anything.
+- `index.export_bundle()` / `import_bundle()` / `bundle_url()` and the `.mtgidx` format
+  (zip of `manifest.json`, gzipped card CSV, `hashes.npy`); `plan_build()` for the dry run.
+- `ui.setup_logging()`; `_load_index` and `_load_ocr` are separate threads with their own
+  events; `_rebuild_identifier()` replaces three copies of that logic; `_ocr_state()`;
+  `_scan_loop` emits frames with an empty detection list when no identifier is loaded.
+- `capture` uses `mss.MSS` where available, silencing a deprecation warning.
+- Tests: `test_index_maintenance.py` (staleness, repair, migration, planning, bundle round
+  trip) and `test_ui_no_index.py` (the no-index window). 54 tests to 72.
+
 ### Fixed (2026-11-16, region modes)
 - **"Region is one card" could make identification impossible.** It treated the region as a
   whole card and tried nothing else, so a region holding part of a card, which is what a fixed
