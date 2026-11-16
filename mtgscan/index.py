@@ -63,6 +63,12 @@ def _migrate(con: sqlite3.Connection) -> None:
     existing = {row[1] for row in con.execute("PRAGMA table_info(cards)")}
     if not existing:
         return
+    if "image_key" in existing and "hash_key" in existing:
+        return                                   # already migrated: do no work, take no locks
+    # Backfilling rewrites every row, which on a full index means a write-ahead log of well
+    # over 100 MB. Done as one transaction and checkpointed afterwards, so interrupting it
+    # leaves the database exactly as it was rather than part-converted.
+    con.execute("BEGIN IMMEDIATE")
     for col in COLUMNS:
         if col not in existing:
             con.execute(f"ALTER TABLE cards ADD COLUMN {col} {_sqltype(col)}")
@@ -77,6 +83,10 @@ def _migrate(con: sqlite3.Connection) -> None:
         con.execute("UPDATE cards SET hash_key = image_key WHERE hash IS NOT NULL")
         log.info("migrated: image_key and hash_key backfilled for existing rows")
     con.commit()
+    try:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.Error as e:                   # a busy reader just means it waits for later
+        log.debug("post-migration checkpoint skipped: %s", e)
 
 
 def _init_schema(con: sqlite3.Connection) -> None:

@@ -23,6 +23,54 @@ def _card(card_id="a", name="Test Card", illustration="art-1", tcgplayer_id=None
     return CardRecord(**values)
 
 
+class TestPriceDescription:
+    """Wording for the in-app price popup, kept testable away from the window code."""
+
+    def test_it_lists_only_the_finishes_a_card_was_printed_in(self):
+        from mtgscan.pricing import PriceQuote, describe_quote
+
+        card = _card(tcgplayer_id=1, finishes="nonfoil")
+        quote = PriceQuote(low=1.5, market=2.0, low_foil=99.0, source="test", low_kind="Near Mint")
+        info = describe_quote(card, quote, age_s=10)
+        assert [r["finish"] for r in info["rows"]] == ["Normal"]
+        assert info["rows"][0]["low"] == "$1.50" and info["rows"][0]["market"] == "$2.00"
+
+    def test_it_shows_foil_and_etched_when_they_exist(self):
+        from mtgscan.pricing import PriceQuote, describe_quote
+
+        card = _card(tcgplayer_id=1, finishes="nonfoil,foil,etched")
+        info = describe_quote(card, PriceQuote(low=1.0, low_foil=5.0, low_etched=9.0, source="t"), 5)
+        assert [r["finish"] for r in info["rows"]] == ["Normal", "Foil", "Etched"]
+        assert info["rows"][2]["low"] == "$9.00"
+
+    def test_it_reports_how_old_the_number_is(self):
+        from mtgscan.pricing import PriceQuote, describe_quote
+
+        card = _card(tcgplayer_id=1, finishes="nonfoil")
+        assert describe_quote(card, PriceQuote(source="t"), 20)["freshness"] == "fetched 20s ago"
+        assert describe_quote(card, PriceQuote(source="t"), 600)["freshness"] == "fetched 10 min ago"
+
+    def test_it_names_the_source_and_what_its_low_covers(self):
+        from mtgscan.pricing import PriceQuote, describe_quote
+
+        info = describe_quote(_card(tcgplayer_id=1, finishes="nonfoil"),
+                              PriceQuote(source="tcgcsv", low_kind="any condition"), 1)
+        assert "tcgcsv" in info["source"] and "any condition" in info["source"]
+
+    def test_it_says_when_no_price_has_arrived_yet(self):
+        from mtgscan.pricing import describe_quote
+
+        info = describe_quote(_card(tcgplayer_id=1, finishes="nonfoil"), None, None)
+        assert "waiting" in info["source"]
+
+    def test_it_carries_the_reason_a_source_was_skipped(self):
+        from mtgscan.pricing import PriceQuote, describe_quote
+
+        info = describe_quote(_card(tcgplayer_id=1, finishes="nonfoil"),
+                              PriceQuote(source="s", note="fallback: HTTP 403"), 1)
+        assert info["note"] == "fallback: HTTP 403"
+
+
 class TestListingLinks:
     """The Near Mint price is reached by opening the page, since TCGplayer refuses
     automated requests for its listings data (it answers them with HTTP 403)."""

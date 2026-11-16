@@ -26,7 +26,8 @@ from .hashing import frame_signature, frames_differ
 from .identify import Detection, Identifier, TemporalVoter, draw_detections
 from .index import BuildOptions, HashIndex, Progress, build_index, bundle_url, import_bundle
 from .ocr import Ocr
-from .pricing import MODES, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService, keys_from_env
+from .pricing import (MODES, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService, describe_quote,
+                      keys_from_env)
 from .scryfall import CardRecord
 
 log = logging.getLogger(__name__)
@@ -236,6 +237,91 @@ class BuildDialog(tk.Toplevel):
         self.destroy()
 
 
+class PriceWindow(tk.Toplevel):
+    """Every price the app holds for one card, with a button to fetch it again now.
+
+    The table has to stay narrow enough to read at a glance while scanning, so it shows
+    four figures and no context. This is where the rest lives: each finish, which source
+    answered, how old the number is, and why a source was skipped.
+    """
+
+    def __init__(self, app: "ScannerApp", card: CardRecord):
+        super().__init__(app.root)
+        self.app, self.card = app, card
+        self.title("Price details")
+        self.resizable(False, False)
+        self.transient(app.root)
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        self.heading = ttk.Label(frm, font=("Segoe UI", 10, "bold"))
+        self.heading.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Label(frm, text="Finish").grid(row=1, column=0, sticky="w")
+        ttk.Label(frm, text="Low").grid(row=1, column=1, sticky="e", padx=12)
+        ttk.Label(frm, text="Market").grid(row=1, column=2, sticky="e")
+        ttk.Separator(frm, orient="horizontal").grid(row=2, column=0, columnspan=3, sticky="we", pady=2)
+        self.rows_frame = ttk.Frame(frm)
+        self.rows_frame.grid(row=3, column=0, columnspan=3, sticky="we")
+        self.source_lbl = ttk.Label(frm, foreground="#444", wraplength=380, justify="left")
+        self.source_lbl.grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.note_lbl = ttk.Label(frm, foreground="#8a4b00", wraplength=380, justify="left")
+        self.note_lbl.grid(row=5, column=0, columnspan=3, sticky="w")
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        self.refresh_btn = ttk.Button(btns, text="Refresh now", command=self.refresh)
+        self.refresh_btn.pack(side="left", padx=4)
+        ttk.Button(btns, text="Open Near Mint page", command=self.open_page).pack(side="left", padx=4)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side="left", padx=4)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.render()
+        self.refresh()                     # always show a number fetched for this viewing
+
+    def render(self) -> None:
+        if not self.winfo_exists():
+            return
+        info = describe_quote(self.card, self.app.prices.cached(self.card),
+                              self.app.prices.age_of(self.card))
+        self.heading.configure(text=info["title"])
+        for child in self.rows_frame.winfo_children():
+            child.destroy()
+        for i, row in enumerate(info["rows"]):
+            ttk.Label(self.rows_frame, text=row["finish"]).grid(row=i, column=0, sticky="w")
+            ttk.Label(self.rows_frame, text=row["low"], font=("Segoe UI", 10, "bold")).grid(
+                row=i, column=1, sticky="e", padx=12)
+            ttk.Label(self.rows_frame, text=row["market"]).grid(row=i, column=2, sticky="e")
+        self.rows_frame.columnconfigure(0, minsize=90)
+        self.rows_frame.columnconfigure(1, minsize=110)
+        self.rows_frame.columnconfigure(2, minsize=110)
+        self.source_lbl.configure(text="  ".join(x for x in (info["source"], info["freshness"]) if x))
+        self.note_lbl.configure(text=info["note"])
+
+    def refresh(self) -> None:
+        self.refresh_btn.configure(state="disabled", text="Refreshing...")
+
+        def run():
+            try:
+                self.app.prices.refresh(self.card)
+            except Exception as e:                       # pragma: no cover - network
+                log.warning("price refresh failed: %s", e)
+            self.app.events.put(("price-window", self))
+
+        threading.Thread(target=run, name="price-refresh", daemon=True).start()
+
+    def on_refreshed(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.refresh_btn.configure(state="normal", text="Refresh now")
+        self.render()
+        self.app._refresh_current()
+        self.app._refresh_history()
+
+    def open_page(self) -> None:
+        url = self.card.tcgplayer_listing_url() or self.card.tcgplayer_product_url
+        if url:
+            webbrowser.open(url)
+
+
 # --- Main application ----------------------------------------------------------------
 
 @dataclass
@@ -372,6 +458,7 @@ class ScannerApp:
         self.tree.tag_configure("none", foreground="#a00000")
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self.open_selected())
+        self.tree.bind("<Return>", lambda e: self.show_price_details())
 
         hist_frame = ttk.Frame(self.nb)
         self.nb.add(hist_frame, text="Seen this session")
@@ -386,13 +473,11 @@ class ScannerApp:
         self.hist.pack(side="left", fill="both", expand=True)
         hvs.pack(side="right", fill="y")
         self.hist.bind("<Double-1>", lambda e: self.open_selected(history=True))
+        self.hist.bind("<Return>", lambda e: self.show_price_details(history=True))
 
         actions = ttk.Frame(left)
         actions.pack(fill="x", pady=(4, 0))
-        ttk.Button(actions, text="Open Near Mint on TCGplayer",
-                   command=self.open_selected).pack(side="left")
-        ttk.Button(actions, text="Near Mint foil",
-                   command=lambda: self.open_selected(foil=True)).pack(side="left", padx=6)
+        ttk.Button(actions, text="Price details", command=self.show_price_details).pack(side="left")
         ttk.Button(actions, text="Export history CSV...", command=self.export_csv).pack(side="left", padx=6)
         ttk.Button(actions, text="Clear history", command=self.clear_history).pack(side="left")
 
@@ -637,6 +722,8 @@ class ScannerApp:
                     self._on_index(ev[1], ev[2])
                 elif kind == "ocr":
                     self._on_ocr(ev[1])
+                elif kind == "price-window":
+                    ev[1].on_refreshed()
                 elif kind == "build":
                     self._on_build(ev[1])
         except queue.Empty:
@@ -820,6 +907,16 @@ class ScannerApp:
             return self.history[sel[0]].card if sel and sel[0] in self.history else None
         d = self._selected_detection()
         return d.card if d and d.card else None
+
+    def show_price_details(self, history: bool = False):
+        """Show every price the app holds for the selected card, and fetch it again now."""
+        card = self._selected_card(history)
+        if card is None:
+            card = self._selected_card(not history)      # whichever tab has a selection
+        if card is None:
+            messagebox.showinfo("Price details", "Select a card first.", parent=self.root)
+            return
+        PriceWindow(self, card)
 
     def open_selected(self, history: bool = False, foil: bool = False):
         """Open the card on TCGplayer, filtered to English Near Mint in one finish.

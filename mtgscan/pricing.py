@@ -99,6 +99,49 @@ class PriceQuote:
         return s + (f" [{self.note}]" if self.note else "")
 
 
+def describe_quote(card: CardRecord, quote: Optional[PriceQuote], age_s: Optional[float]) -> dict:
+    """Everything known about one card's price, laid out for display.
+
+    Kept out of the window code so the wording can be tested without building a UI.
+    """
+    finishes = card.finishes.split(",") if card.finishes else []
+    rows = []
+    for label, finish, low_attr, market_attr in (
+            ("Normal", "nonfoil", "low", "market"),
+            ("Foil", "foil", "low_foil", "market_foil"),
+            ("Etched", "etched", "low_etched", "market_etched")):
+        if finish not in finishes:
+            continue
+        low = getattr(quote, low_attr) if quote else None
+        market = getattr(quote, market_attr) if quote else None
+        if market is None and quote is None:
+            market = card.usd_foil if finish == "foil" else (card.usd_etched if finish == "etched" else card.usd)
+        rows.append({"finish": label,
+                     "low": PriceQuote.fmt(low),
+                     "market": PriceQuote.fmt(market)})
+    if not rows:
+        rows.append({"finish": "Normal", "low": "-", "market": PriceQuote.fmt(card.usd)})
+
+    if quote is None:
+        source, freshness = "waiting for a price...", ""
+    elif quote.source == "unavailable":
+        source, freshness = "no price source could answer", ""
+    else:
+        source = quote.source
+        if quote.low_kind:
+            source += f" (low is {quote.low_kind})"
+        if age_s is None:
+            freshness = ""
+        elif age_s < 90:
+            freshness = f"fetched {int(age_s)}s ago"
+        else:
+            freshness = f"fetched {int(age_s / 60)} min ago"
+    return {"title": f"{card.name}  -  {card.set_label}  #{card.collector_number}",
+            "rows": rows, "source": source, "freshness": freshness,
+            "note": quote.note if quote else "",
+            "url": card.tcgplayer_listing_url() or card.tcgplayer_product_url}
+
+
 def _f(v) -> Optional[float]:
     try:
         return float(v) if v not in (None, "") else None
@@ -539,6 +582,23 @@ class PriceService:
         with self._lock:
             self._cache[key] = q
         return q
+
+    def refresh(self, card: CardRecord) -> PriceQuote:
+        """Fetch this card's price again now, ignoring the cache.
+
+        Quotes are cached for fifteen minutes so scanning does not hammer a provider, but
+        when someone is watching one card and asks for its price, they mean the price now.
+        """
+        with self._lock:
+            self._cache.pop((self.mode, card.id), None)
+            self._disabled_until.pop(self.mode, None)   # give a paused provider another go
+        return self.get(card)
+
+    def age_of(self, card: CardRecord) -> Optional[float]:
+        """Seconds since this card's cached quote was fetched."""
+        with self._lock:
+            q = self._cache.get((self.mode, card.id))
+        return None if q is None else time.time() - q.fetched_at
 
     def cached(self, card: CardRecord) -> Optional[PriceQuote]:
         with self._lock:

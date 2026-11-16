@@ -4,6 +4,24 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### User-facing (2026-11-16, price details)
+- **New "Price details" window**, opened by the button or by pressing Enter on a row. It
+  shows every figure the app holds for that card, low and market for each finish it was
+  printed in, which source answered, how old the number is, and why a source was skipped.
+- It fetches the price again on opening, and **"Refresh now"** forces a fresh fetch that
+  ignores the fifteen-minute cache, for when you are watching one card and want the price now.
+- The two buttons that opened TCGplayer are gone; double-clicking a row still opens the card
+  filtered to Near Mint, and the price window keeps a link too.
+
+### Internal (2026-11-16, price details)
+- `pricing.describe_quote()` builds the window's wording and is tested without a UI;
+  `PriceService.refresh()` drops the cached quote and re-enables a paused provider;
+  `PriceService.age_of()` reports how old a cached quote is. `ui.PriceWindow`.
+- `index._migrate()` now returns immediately when already migrated, runs its backfill as one
+  transaction and truncates the write-ahead log afterwards. Backfilling a full index rewrites
+  every row and produced a 116 MB log; interrupting that left a database that read as
+  malformed. Recovering it took one `--import-bundle`, which is what the bundles are for.
+
 ### User-facing (2026-11-16, Near Mint prices)
 - **Opening a card goes straight to its Near Mint listings.** "Open Near Mint on TCGplayer",
   and double-clicking a row, now open the product page already filtered to English Near Mint
