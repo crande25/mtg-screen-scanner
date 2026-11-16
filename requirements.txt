@@ -1,0 +1,7 @@
+numpy>=1.26
+opencv-python-headless>=4.9
+pillow>=10
+mss>=9
+requests>=2.31
+ijson>=3.2
+rapidfuzz>=3.6
