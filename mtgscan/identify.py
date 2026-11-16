@@ -7,13 +7,15 @@ TCG Machines write-ups referenced in the README.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 import cv2
 import numpy as np
 
-from .config import HASH_BITS, MATCH_ACCEPT, MATCH_STRONG, SAME_ART_DELTA, WARP_H, WARP_W
+from .config import (HASH_BITS, MATCH_ACCEPT, MATCH_MIN_MARGIN, MATCH_RELAXED, MATCH_STRONG,
+                     SAME_ART_DELTA, WARP_H, WARP_W)
 from .detect import (Quad, axis_aligned, find_cards, looks_like_card, projection_quads,
                      warp_card, whole_frame_quad)
 from .hashing import card_hash
@@ -62,6 +64,7 @@ class Detection:
     card: Optional[CardRecord] = None
     candidates: list[Candidate] = field(default_factory=list)
     distance: Optional[int] = None
+    margin: Optional[int] = None   # bits the nearest different artwork trails the winner by
     confidence: float = 0.0
     method: str = "none"          # hash | hash+ocr | ocr-name | none
     ocr_set: Optional[str] = None
@@ -171,25 +174,49 @@ class Identifier:
         _, img, matches, rotated, chosen = best
         det = Detection(quad=chosen, image=img, rotated=rotated)
 
-        accept = MATCH_ACCEPT * HASH_BITS
-        if matches and matches[0][1] <= accept:
+        margin = self._margin(matches)
+        det.margin = margin if matches else None
+        if matches and self._accept(matches[0][1], margin):
             self._resolve_hash_match(det, matches, frame)
         else:
-            det.note = f"no hash match (best d={matches[0][1] if matches else 'n/a'})"
+            det.note = (f"no hash match (best d={matches[0][1]}, margin {margin})"
+                        if matches else "no hash match")
             if allow_name_fallback:
                 self._fallback_ocr_name(det, frame)
         return det
+
+    @staticmethod
+    def _accept(distance: int, margin: int) -> bool:
+        """Close enough outright, or further off but standing clear of every other artwork."""
+        return (distance <= MATCH_ACCEPT * HASH_BITS
+                or (distance <= MATCH_RELAXED * HASH_BITS and margin >= MATCH_MIN_MARGIN))
+
+    def _margin(self, matches: list[tuple[int, int]]) -> int:
+        """How far the nearest *different* artwork trails the winner.
+
+        Reprints of one artwork cluster together, so the runner-up is skipped until the
+        artwork changes. Content that is not a card at all sits roughly equidistant from
+        everything in a 107k index and so has almost no margin, which is what makes this
+        a far better signal than absolute distance for a filmed card.
+        """
+        if not matches:
+            return 0
+        winner = self.index.card(matches[0][0])
+        for rowid, distance in matches[1:]:
+            if self.index.card(rowid).illustration_id != winner.illustration_id:
+                return distance - matches[0][1]
+        return 1 << 20   # nothing else in the top matches is even a different picture
 
     def _best_orientation(self, img: np.ndarray):
         """Hash the card upright and rotated 180 degrees; keep the better orientation."""
         if len(self.index) == 0:
             return None
         h = card_hash(img)
-        m = self.index.query(h, k=15)
+        m = self.index.query(h, k=40)
         if m and m[0][1] <= MATCH_STRONG * HASH_BITS:
             return img, m, False
         rot = cv2.rotate(img, cv2.ROTATE_180)
-        m2 = self.index.query(card_hash(rot), k=15)
+        m2 = self.index.query(card_hash(rot), k=40)
         if m2 and (not m or m2[0][1] < m[0][1]):
             return rot, m2, True
         return img, m, False
@@ -210,7 +237,7 @@ class Identifier:
         area = float(h * w)
         quads = projection_quads(frame, area * 0.003, area * 0.985,
                                  max_quads=PROJECTION_MAX_QUADS)
-        best: Optional[tuple[int, Quad]] = None
+        best: Optional[tuple[int, Quad, int]] = None
         for quad in quads:
             x0, y0, x1, y1 = quad.bbox
             qw, qh = x1 - x0, y1 - y0
@@ -218,12 +245,12 @@ class Identifier:
                 dx, dy = qw * ex, qh * ey
                 grown = Quad(np.array([[x0 - dx, y0 - dy], [x1 + dx, y0 - dy],
                                        [x1 + dx, y1 + dy], [x0 - dx, y1 + dy]], dtype=np.float32))
-                matches = self.index.query(card_hash(warp_card(frame, grown)), k=1)
+                matches = self.index.query(card_hash(warp_card(frame, grown)), k=40)
                 if not matches:
                     continue
                 if best is None or matches[0][1] < best[0]:
-                    best = (matches[0][1], grown)
-        if best is None or best[0] > MATCH_ACCEPT * HASH_BITS:
+                    best = (matches[0][1], grown, self._margin(matches))
+        if best is None or not self._accept(best[0], best[2]):
             return None
         return best[1]
 
@@ -259,7 +286,7 @@ class Identifier:
         det.candidates = cands
         det.distance = best_d
         det.confidence = max(0.0, 1.0 - best_d / HASH_BITS)
-        det.method = "hash"
+        det.method = "hash" if best_d <= MATCH_ACCEPT * HASH_BITS else "hash+margin"
         det.card = cands[0].card
 
         if len(cands) > 1 and self.ocr is not None:
@@ -344,6 +371,56 @@ class Identifier:
         if chosen is not None:
             det.card = chosen.card
             det.candidates = [chosen] + [c for c in cands if c is not chosen]
+
+
+class TemporalVoter:
+    """Keeps a steady reading across the frames of a video.
+
+    A live stream gives dozens of looks at the same card, and they are not equally good:
+    the camera drifts, a hand crosses the card, glare washes out a frame. Judging each
+    frame alone makes the table flicker between a card and nothing. Votes are collected
+    over a short window instead, so one bad frame cannot erase a card that several good
+    frames agree on, and one stray match cannot promote a card the rest disagree with.
+    """
+
+    def __init__(self, window_s: float = 12.0, min_votes: int = 2):
+        self.window_s = window_s
+        self.min_votes = min_votes
+        self._votes: dict[str, dict] = {}
+
+    def observe(self, dets: list[Detection], now: Optional[float] = None) -> None:
+        now = time.time() if now is None else now
+        for det in dets:
+            if det.card is None:
+                continue
+            entry = self._votes.get(det.card.id)
+            distance = det.distance if det.distance is not None else 1 << 20
+            if entry is None:
+                self._votes[det.card.id] = {"detection": det, "count": 1, "last": now,
+                                            "distance": distance}
+            else:
+                entry["count"] += 1
+                entry["last"] = now
+                if distance < entry["distance"]:      # keep the clearest look at the card
+                    entry["detection"], entry["distance"] = det, distance
+        self._expire(now)
+
+    def _expire(self, now: float) -> None:
+        for card_id in [k for k, v in self._votes.items() if now - v["last"] > self.window_s]:
+            del self._votes[card_id]
+
+    def stable(self, now: Optional[float] = None) -> Optional[tuple[Detection, float]]:
+        """The agreed card and how long ago it was last seen, or None."""
+        now = time.time() if now is None else now
+        self._expire(now)
+        ranked = [v for v in self._votes.values() if v["count"] >= self.min_votes]
+        if not ranked:
+            return None
+        best = max(ranked, key=lambda v: (v["count"], -v["distance"]))
+        return best["detection"], now - best["last"]
+
+    def clear(self) -> None:
+        self._votes.clear()
 
 
 def draw_detections(frame: np.ndarray, dets: list[Detection]) -> np.ndarray:

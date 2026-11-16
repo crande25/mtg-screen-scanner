@@ -23,7 +23,7 @@ from . import __version__
 from .capture import ScreenCapture
 from .config import MATCH_STRONG, data_dir
 from .hashing import frame_signature, frames_differ
-from .identify import Detection, Identifier, draw_detections
+from .identify import Detection, Identifier, TemporalVoter, draw_detections
 from .index import BuildOptions, HashIndex, Progress, build_index
 from .ocr import Ocr
 from .pricing import MODES, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService, keys_from_env
@@ -265,6 +265,8 @@ class ScannerApp:
         self.stop_evt = threading.Event()
         self.force_scan = threading.Event()
         self.current: list[Detection] = []
+        self.voter = TemporalVoter()
+        self.held_for: Optional[float] = None   # seconds since the held card was last seen
         self.history: dict[str, HistoryEntry] = {}
         self._last_ids: set[str] = set()
         self._preview_photo = None
@@ -593,9 +595,20 @@ class ScannerApp:
             self._update_status(p.message)
 
     def _on_frame(self, frame, dets: list[Detection], secs: float):
+        scanned = dets
+        self.voter.observe(dets)
+        self.held_for = None
+        if not any(d.card for d in dets):
+            # Video drops frames a card cannot be read from. Keep showing the card the
+            # recent frames agreed on instead of blanking the table on every bad one.
+            held = self.voter.stable()
+            if held is not None:
+                dets, self.held_for = [held[0]], held[1]
         self.current = dets
         self._last_frame = frame
-        self._render_preview(frame, dets)
+        # The preview draws this frame's own geometry; a held card's outline came from an
+        # earlier frame and would box the wrong place.
+        self._render_preview(frame, scanned)
         self._refresh_current()
         now = time.time()
         ids_now = {d.card.id for d in dets if d.card}
@@ -613,7 +626,10 @@ class ScannerApp:
             self.prices.request(d.card, lambda c, q: self.events.put(("price", c, q)))
         self._last_ids = ids_now
         self._refresh_history()
-        self._update_status(self._scan_summary(dets, secs))
+        summary = self._scan_summary(scanned, secs)
+        if self.held_for is not None:
+            summary += f"  Holding the last agreed card, seen {self.held_for:.0f}s ago."
+        self._update_status(summary)
 
     @staticmethod
     def _scan_summary(dets: list[Detection], secs: float) -> str:
@@ -646,6 +662,8 @@ class ScannerApp:
         conf = f"{d.confidence * 100:.0f}%"
         tag = "strong" if d.confidence >= 1 - MATCH_STRONG else "weak"
         how = d.method + (" *" if d.ambiguous else "")
+        if self.held_for is not None and self.current and d is self.current[0]:
+            how = f"held {self.held_for:.0f}s"
         prices = tuple(_money(q, c, d.card) for c in PRICE_COLS)
         return ((d.card.name, d.card.set_label, d.card.collector_number) + prices + (conf, how), tag)
 

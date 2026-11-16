@@ -4,6 +4,40 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### User-facing (2026-11-16, live video)
+- **Cards on a live video stream are now identified.** A filmed card matches far less exactly
+  than a digital image, so it was being rejected by a fixed distance cutoff even when correct.
+  A match is now accepted on how far it leads the nearest different artwork, which separates a
+  real card from noise cleanly where absolute distance does not.
+- **The reading is held across frames.** A stream gives many looks at one card and some are
+  unreadable; the table no longer flickers between a card and nothing, and shows `held Ns`
+  while relying on earlier frames. The card several frames agree on beats a one-frame fluke.
+- "Use OCR" no longer stays off for good after being turned on. When the package was missing
+  the app unticked it, and the next settings change saved that as a deliberate preference.
+- README gained a "Scanning live video" section with the measured numbers and the limits.
+
+### Internal (2026-11-16, live video)
+- `config.MATCH_RELAXED` (0.33) and `MATCH_MIN_MARGIN` (28) alongside the existing
+  `MATCH_ACCEPT`. `Identifier._accept()` takes a distance and a margin;
+  `Identifier._margin()` returns how far the nearest different `illustration_id` trails the
+  winner, skipping reprints of the same art, and reports a very large margin when no other
+  artwork appears in the candidates. Candidate queries widened from k=15 to k=40 so a
+  competing artwork is actually present. `Detection.margin` added, and a match accepted this
+  way reports its method as `hash+margin`.
+- `identify.TemporalVoter` collects votes over a 12 second window, needs 2 agreeing frames,
+  keeps the clearest look at each card and expires silently. The UI holds the stable card when
+  a frame yields nothing, while the preview still draws the current frame's own geometry.
+- Measured, and the basis for those constants: a live auction stream gave a correct filmed
+  card at distance 106 with a margin of 58; 36 frames with no card in them gave 189 or more
+  with margins of 0 to 6; after the change the real frame identifies correctly at 121 with a
+  margin of 43, with no false positives across those 36 frames.
+- Art-crop matching was measured and rejected. On the same real frame the true card scored 194
+  by artwork with a margin of 7, against 106 and 58 for the whole card, so the second index it
+  would have required was not built.
+- `tests/test_matching.py` covers the acceptance rule and the voter; `tests/test_identify_e2e.py`
+  gained a webcam simulation (tilt, glare, exposure, blur, compression) and a noise-rejection
+  test. 41 tests to 53.
+
 ### Fixed (2026-11-16, first real-screen testing)
 - **Selecting a region produced nothing at all, with no error.** The OCR fallback passed a
   numpy array through `or`, which raises, and the per-card handler swallowed it, so every

@@ -127,6 +127,29 @@ Check any card from the command line (add `--modes` to pick sources):
 .venv/Scripts/python.exe -m mtgscan.pricing "Lightning Bolt" --set m10
 ```
 
+## Scanning live video
+
+Pointing the region at a live stream of physical cards, such as an auction broadcast, works
+and is handled deliberately, but it is a harder problem than reading card images on a web
+page. A filmed card carries tilt, glare, webcam exposure and video compression, so it matches
+much less exactly: on a real stream a correct card scored 106 where a flat digital scan of the
+same card scores about 18, against a plain cutoff of 112.
+
+Two things make it work:
+
+- **A match is accepted on its margin, not only its distance.** What separates a real card
+  from noise is how far it stands clear of the nearest *different* artwork. Measured on a live
+  stream, a correct filmed card led by 58 bits, while 36 frames containing no card at all led
+  by 6 or less. So a more distant match is accepted when it leads the field convincingly, and
+  a close-looking one is refused when it does not.
+- **Votes are collected across frames.** A stream offers the same card dozens of times and
+  some looks are ruined by a passing hand or a glare. The reading is held across those frames
+  rather than flickering between a card and nothing, and the table shows `held Ns` while it
+  is relying on earlier frames. The card several frames agree on wins over a one-frame fluke.
+
+Keep the region on the card itself rather than the whole video player, and note that any
+window placed over the region is what gets scanned, since the app reads the screen.
+
 ## Accuracy notes and limits
 
 - **Draw the region close around the cards.** Measured against a card displayed on a real

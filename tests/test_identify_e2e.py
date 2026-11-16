@@ -154,6 +154,46 @@ def test_card_on_a_dark_background_with_margin_is_found(small_index):
         [(d.card.name, d.distance) for d in dets if d.card]
 
 
+def _film(card: np.ndarray, tilt: float = 0.018, glare: float = 0.45, exposure: float = 0.8,
+          height: int = 430, quality: int = 45) -> np.ndarray:
+    """Approximate a card seen through a webcam: tilt, glare, exposure, blur, compression."""
+    h, w = card.shape[:2]
+    src = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], np.float32)
+    dx, dy = w * tilt, h * tilt
+    dst = np.array([[dx, 0], [w - 1, dy], [w - 1 - dx, h - 1], [0, h - 1 - dy]], np.float32)
+    out = cv2.warpPerspective(card, cv2.getPerspectiveTransform(src, dst), (w, h))
+    gx = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+    gy = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+    hot = np.exp(-((gx - 0.3) ** 2 + (gy + 0.4) ** 2) * 3.0) * glare
+    out = np.clip(out.astype(np.float32) * exposure * (1.0 + hot[..., None]), 0, 255).astype(np.uint8)
+    out = cv2.GaussianBlur(out, (3, 3), 0)
+    out = cv2.resize(out, (int(height * w / h), height), interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+
+def test_a_filmed_card_is_identified(small_index):
+    """A card on a live stream lands far past the plain cutoff but stands clear of the field.
+
+    Modelled on a real auction stream, where the correct card scored 106 against a cutoff
+    of 112 while the nearest different artwork was 58 bits behind it.
+    """
+    rec = _pick(small_index, 3)[1]
+    filmed = _film(_normal_image(rec))
+    dets = Identifier(small_index, ocr=None).identify_frame(filmed, single_card=True)
+    assert dets and dets[0].card is not None, dets[0].note
+    assert dets[0].card.id == rec.id, (dets[0].card.name, dets[0].distance, dets[0].margin)
+
+
+def test_noise_is_still_rejected_under_the_margin_rule(small_index):
+    """The relaxed ceiling must not let content that is not a card through."""
+    rng = np.random.default_rng(11)
+    for seed_shift in range(3):
+        noise = rng.integers(0, 255, (430 + seed_shift, 308, 3), dtype=np.uint8)
+        dets = Identifier(small_index, ocr=None).identify_frame(noise, single_card=True)
+        assert dets[0].card is None, (dets[0].card.name, dets[0].distance, dets[0].margin)
+
+
 def test_skewed_quads_are_rejected():
     from mtgscan.detect import quad_is_sane
 

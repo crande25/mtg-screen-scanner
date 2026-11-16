@@ -42,3 +42,14 @@ WARP_W, WARP_H = 292, 408   # canonical size of a detected card (2x Scryfall "sm
 MATCH_ACCEPT = 0.22     # best distance must be at most this (112 bits) to count as a match
 MATCH_STRONG = 0.12     # at or below this (61 bits) the match is reported as confident
 SAME_ART_DELTA = 12     # printings closer than this (in bits) to the best are "ambiguous"
+
+# A card filmed by a webcam (an auction stream, say) carries tilt, glare and video
+# compression, so it lands near the rejection boundary even when correct: a real stream
+# frame scored 106 against the 112 cutoff. What still separates it cleanly is the margin
+# over the nearest *different* artwork. Measured on that frame and on 36 frames of a
+# window with no card in them:
+#     real filmed card   best 106   margin 58
+#     no card present    best 189+  margin 0-6
+# So a larger absolute distance is accepted when the winner stands well clear of the field.
+MATCH_RELAXED = 0.33    # 169 bits: the furthest a match may sit when its margin is wide
+MATCH_MIN_MARGIN = 28   # bits the runner-up artwork must trail by for that to apply
