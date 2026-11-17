@@ -143,6 +143,7 @@ market price automatically when a source has nothing for a card or is down.
 | Mode | Low columns | Market columns | Notes |
 | --- | --- | --- | --- |
 | TCGplayer low + market (tcgcsv.com, daily) | TCGplayer's lowest listing, any condition | TCGplayer market | **Default.** [tcgcsv.com](https://tcgcsv.com) mirrors the official TCGplayer price points daily and is free to use. Needs no keys. One request per set, cached an hour. |
+| JustTCG Near Mint (6-hourly, free key, 100/day) | Near Mint price per finish as [JustTCG](https://justtcg.com) tracks it from TCGplayer | TCGplayer market (Scryfall's daily figure) | **The freshest condition-level figure available without a TCGplayer key:** JustTCG updates about every six hours. Needs a free JustTCG key (**API keys...**): 1,000 requests a month, 100 a day, 10 a minute. One request per card, kept for six hours; the price window shows how many requests are left today. When the day's quota is spent the app falls back to tcgcsv until midnight UTC and says so. |
 | TCGplayer market only (Scryfall, daily) | none | TCGplayer market | What Scryfall's `usd`/`usd_foil` are: the market price, synced every 24 hours ([Scryfall FAQ](https://scryfall.com/docs/faqs/where-do-scryfall-prices-come-from-7)). |
 | TCGplayer lowest Near Mint (official API) | lowest Near Mint listing per finish | NM market | Needs a TCGplayer API key pair (**API keys...**). TCGplayer rarely issues keys any more; written from the public docs, untested without keys. |
 | TCGplayer lowest Near Mint (website data) | lowest Near Mint listing per finish | none | **Does not work: TCGplayer answers these requests with HTTP 403.** Kept in case that changes; the app falls back to the market price and says so in the status bar. |
@@ -154,10 +155,17 @@ foil columns.
 ### Getting a Near Mint price
 
 TCGplayer refuses automated requests for its listings data, and getting past that would mean
-impersonating a browser, which this project will not do. The Near Mint figure is one click
-away instead: **Open Near Mint on TCGplayer**, or double-clicking a row, opens the product
-page already filtered to English Near Mint in the normal printing, and **Near Mint foil** does
-the same for foil. The lowest Near Mint price is then the first figure on the page.
+impersonating a browser, which this project will not do. Two honest routes remain:
+
+- **In the app:** the JustTCG mode above, with a free key. **Price details** (the button, or
+  Enter on a row) shows the Near Mint figure for each finish, how old it is and the quota left;
+  **Refresh now** fetches it again on the spot.
+- **On the page:** double-clicking a row opens the product page already filtered to English
+  Near Mint in the normal printing, and the price window links there too. The lowest Near Mint
+  listing is then the first figure on the page.
+
+No free source offers true intraday TCGplayer prices; six-hourly is the ceiling this project
+found after reading each candidate's own documentation (JustTCG, TCG Price Lookup, MTGJSON).
 
 The gap is real but modest. For Lightning Bolt (M10) the any-condition low is $0.74 while the
 Near Mint low is $0.89.

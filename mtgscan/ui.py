@@ -26,8 +26,8 @@ from .hashing import frame_signature, frames_differ
 from .identify import Detection, Identifier, TemporalVoter, draw_detections
 from .index import BuildOptions, HashIndex, Progress, build_index, bundle_url, import_bundle
 from .ocr import Ocr
-from .pricing import (MODES, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService, describe_quote,
-                      keys_from_env)
+from .pricing import (MODES, MODE_JUSTTCG, MODE_SHORT, MODE_TCGCSV, PriceQuote, PriceService,
+                      describe_quote, keys_from_env)
 from .scryfall import CardRecord
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ DEFAULT_SETTINGS = {
     "use_ocr": True,
     "tcgplayer_public_key": "",
     "tcgplayer_private_key": "",
+    "justtcg_api_key": "",
 }
 
 
@@ -372,7 +373,8 @@ class ScannerApp:
         self.index: Optional[HashIndex] = None
         self.identifier: Optional[Identifier] = None
         self.ocr: Optional[Ocr] = None
-        self.prices = PriceService(mode=self.settings.get("pricing", MODE_TCGCSV), keys=self._tcg_keys())
+        self.prices = PriceService(mode=self.settings.get("pricing", MODE_TCGCSV), keys=self._tcg_keys(),
+                                   justtcg_key=self.settings.get("justtcg_api_key") or "")
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
         self.stop_evt = threading.Event()
@@ -423,7 +425,7 @@ class ScannerApp:
         self.ocr_chk.pack(side="left", padx=(0, 12))
         ttk.Label(bar, text="Prices:").pack(side="left")
         self.pricing_var = tk.StringVar()
-        self.pricing_cb = ttk.Combobox(bar, state="readonly", width=38, values=list(MODES.values()), textvariable=self.pricing_var)
+        self.pricing_cb = ttk.Combobox(bar, state="readonly", width=50, values=list(MODES.values()), textvariable=self.pricing_var)
         self.pricing_cb.pack(side="left", padx=(4, 12))
         self.pricing_cb.bind("<<ComboboxSelected>>", lambda e: self._settings_changed())
         ttk.Button(bar, text="API keys...", command=self.edit_keys).pack(side="left", padx=(0, 12))
@@ -547,33 +549,49 @@ class ScannerApp:
 
     def edit_keys(self):
         dlg = tk.Toplevel(self.root)
-        dlg.title("TCGplayer API keys")
+        dlg.title("Price API keys")
         dlg.resizable(False, False)
         dlg.transient(self.root)
         frm = ttk.Frame(dlg, padding=12)
         frm.pack(fill="both", expand=True)
         ttk.Label(frm, justify="left", text=(
-            "Only needed for the 'official API' price mode. TCGplayer issues keys to\n"
-            "approved developers; if you have a pair, paste it here. Keys are stored in\n"
-            "settings.json in the app data folder (or set TCGPLAYER_PUBLIC_KEY /\n"
-            "TCGPLAYER_PRIVATE_KEY in the environment).")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+            "JustTCG: a free key from justtcg.com unlocks the 'JustTCG Near Mint' price\n"
+            "mode, the freshest condition-level figure available (updated about every six\n"
+            "hours). The free plan allows 100 requests a day; each card asked about costs\n"
+            "one, and the answer is kept for six hours.\n\n"
+            "TCGplayer: only for the 'official API' mode. TCGplayer issues these keys to\n"
+            "approved developers; if you have a pair, paste it here.\n\n"
+            "Keys are stored in settings.json in the app data folder, or come from the\n"
+            "environment (JUSTTCG_API_KEY, TCGPLAYER_PUBLIC_KEY, TCGPLAYER_PRIVATE_KEY).")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        just = tk.StringVar(value=self.settings.get("justtcg_api_key", ""))
         pub = tk.StringVar(value=self.settings.get("tcgplayer_public_key", ""))
         priv = tk.StringVar(value=self.settings.get("tcgplayer_private_key", ""))
-        ttk.Label(frm, text="Public key").grid(row=1, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=pub, width=48).grid(row=1, column=1, sticky="w", pady=2)
-        ttk.Label(frm, text="Private key").grid(row=2, column=0, sticky="w")
-        ttk.Entry(frm, textvariable=priv, width=48, show="*").grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Label(frm, text="JustTCG key").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=just, width=48, show="*").grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(frm, text="TCGplayer public key").grid(row=2, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(frm, textvariable=pub, width=48).grid(row=2, column=1, sticky="w", pady=2)
+        ttk.Label(frm, text="TCGplayer private key").grid(row=3, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=priv, width=48, show="*").grid(row=3, column=1, sticky="w", pady=2)
 
         def save():
+            self.settings["justtcg_api_key"] = just.get().strip()
             self.settings["tcgplayer_public_key"] = pub.get().strip()
             self.settings["tcgplayer_private_key"] = priv.get().strip()
             save_settings(self.settings)
             self.prices.set_keys(*self._tcg_keys())
+            self.prices.set_justtcg_key(self.settings["justtcg_api_key"])
+            if self.settings["justtcg_api_key"] and self.settings.get("pricing") != MODE_JUSTTCG:
+                # A key was just pasted: that is what they want to use.
+                self.settings["pricing"] = MODE_JUSTTCG
+                self.pricing_var.set(MODES[MODE_JUSTTCG])
+                save_settings(self.settings)
+                self.prices.set_mode(MODE_JUSTTCG)
             self._rerequest_prices()
             dlg.destroy()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Save", command=save).pack(side="left", padx=4)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
 

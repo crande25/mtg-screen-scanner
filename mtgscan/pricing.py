@@ -14,10 +14,16 @@ Sources, selectable in the UI:
   longer hands out freely.
 * TcgplayerSiteProvider: lowest Near Mint listing from the marketplace JSON the
   tcgplayer.com product page itself loads. Unofficial and unverified here; opt-in.
+* JustTcgProvider: the Near Mint price per printing from justtcg.com, which tracks
+  TCGplayer and updates about every six hours, the freshest condition-level figure
+  available without a TCGplayer key. Needs a free JustTCG key (1,000 requests a month,
+  100 a day, 10 a minute), so quotes from it are cached for six hours and the quota
+  left for the day is shown with each one.
 
-PriceService picks the provider for the chosen mode, falls back to Scryfall per card
-when a product is unknown and for 5 minutes when a provider is down, caches results and
-runs lookups on a background thread so scanning never waits on the network.
+PriceService picks the provider for the chosen mode, falls back per card when a product
+is unknown and for a while when a provider is down (to tcgcsv first, since it has a low
+figure, then to Scryfall's market), caches results and runs lookups on a background
+thread so scanning never waits on the network.
 
 Check any card from the command line:  python -m mtgscan.pricing "Lightning Bolt" --set m10
 """
@@ -47,22 +53,36 @@ MODE_TCGCSV = "tcgcsv_daily"
 MODE_SCRYFALL = "scryfall_market"
 MODE_TCG_API = "tcgplayer_api_lowest"
 MODE_TCG_SITE = "tcgplayer_site_lowest"
+MODE_JUSTTCG = "justtcg_nm"
 MODES = {
     MODE_TCGCSV: "TCGplayer low + market (tcgcsv.com, daily)",
+    MODE_JUSTTCG: "JustTCG Near Mint (6-hourly, free key, 100/day)",
     MODE_SCRYFALL: "TCGplayer market only (Scryfall, daily)",
     MODE_TCG_API: "TCGplayer lowest Near Mint (official API, needs keys)",
     MODE_TCG_SITE: "TCGplayer lowest Near Mint (website data, unofficial)",
 }
 MODE_SHORT = {
     MODE_TCGCSV: "tcgcsv daily",
+    MODE_JUSTTCG: "JustTCG NM",
     MODE_SCRYFALL: "Scryfall market",
     MODE_TCG_API: "TCG API NM",
     MODE_TCG_SITE: "TCG site NM",
 }
+# How long a quote stays fresh, per mode. JustTCG moves every six hours and its free
+# quota is 100 calls a day, so asking again sooner only spends quota.
+MODE_TTL_S = {MODE_JUSTTCG: 6 * 3600.0}
 
 
 class PriceUnavailable(Exception):
-    """The provider is down or refused (blocked, bad keys, rate limited): back off."""
+    """The provider is down or refused (blocked, bad keys, rate limited): back off.
+
+    retry_s says how long to leave it alone; a daily quota that is spent stays spent
+    until midnight UTC, a per-minute limit clears in a minute.
+    """
+
+    def __init__(self, msg: str, retry_s: float = 300.0):
+        super().__init__(msg)
+        self.retry_s = retry_s
 
 
 class PriceNotFound(Exception):
@@ -151,6 +171,16 @@ def _f(v) -> Optional[float]:
 
 def keys_from_env() -> tuple[str, str]:
     return os.environ.get("TCGPLAYER_PUBLIC_KEY", ""), os.environ.get("TCGPLAYER_PRIVATE_KEY", "")
+
+
+def justtcg_key_from_env() -> str:
+    return os.environ.get("JUSTTCG_API_KEY", "")
+
+
+def seconds_until_utc_midnight(now: float | None = None) -> float:
+    """JustTCG's daily quota resets at midnight UTC."""
+    t = time.time() if now is None else now
+    return 86400.0 - (t % 86400.0)
 
 
 def _json_session() -> requests.Session:
@@ -530,6 +560,150 @@ class TcgplayerSiteProvider:
         return q
 
 
+# --- JustTCG (tracks TCGplayer, condition-level, about six-hourly, free key) ------------
+
+class JustTcgProvider:
+    """Near Mint price per printing from api.justtcg.com, looked up by TCGplayer product id.
+
+    One GET /v1/cards?tcgplayerId=... per product, filtered to English Near Mint, with the
+    price history left out to keep the answer small. JustTCG reports one figure per
+    (condition, printing), "the last price the market reported for this condition", so it
+    goes in the low column labelled Near Mint; the market columns keep Scryfall's daily
+    TCGplayer market price from the index, and the quote says so.
+
+    Errors follow docs.justtcg.com: 401 bad key, 403 no active plan, 429 with a code that
+    says whether the minute, the day or the month ran out.
+    """
+
+    name = "JustTCG Near Mint"
+    BASE = "https://api.justtcg.com/v1"
+
+    def __init__(self, api_key: str, per_minute: float = 10.0):
+        self.api_key = (api_key or "").strip()
+        self.limiter = RateLimiter(per_minute / 60.0)
+        self.s = _json_session()
+        self.requests_left_today: Optional[int] = None
+        self.requests_left_month: Optional[int] = None
+        self.plan: str = ""
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
+
+    def _get(self, **params) -> dict:
+        if not self.configured:
+            raise PriceUnavailable("no JustTCG key configured (API keys...)", retry_s=3600.0)
+        self.limiter.wait()
+        r = self.s.get(f"{self.BASE}/cards", params=params, headers={"x-api-key": self.api_key}, timeout=20)
+        if r.status_code in (400, 401, 403, 429):
+            try:
+                body = r.json()
+            except ValueError:
+                body = {}
+            code = str(body.get("code") or "")
+            msg = str(body.get("error") or f"HTTP {r.status_code}")
+            if r.status_code == 401:
+                raise PriceUnavailable(f"JustTCG rejected the key ({msg})", retry_s=3600.0)
+            if r.status_code == 403:
+                raise PriceUnavailable(f"JustTCG plan not active ({msg})", retry_s=3600.0)
+            if code == "DAILY_LIMIT_EXCEEDED":
+                self.requests_left_today = 0
+                raise PriceUnavailable("JustTCG daily quota used up; resets at midnight UTC",
+                                       retry_s=seconds_until_utc_midnight())
+            if code == "REQUEST_LIMIT_EXCEEDED":
+                self.requests_left_month = 0
+                raise PriceUnavailable("JustTCG monthly quota used up", retry_s=86400.0)
+            if r.status_code == 429:
+                raise PriceUnavailable(f"JustTCG rate limit ({msg})", retry_s=65.0)
+            raise PriceUnavailable(f"JustTCG refused the request ({msg})", retry_s=300.0)
+        r.raise_for_status()
+        body = r.json()
+        meta = body.get("_metadata") or {}
+        if "apiDailyRequestsRemaining" in meta:
+            self.requests_left_today = _int(meta.get("apiDailyRequestsRemaining"))
+        if "apiRequestsRemaining" in meta:
+            self.requests_left_month = _int(meta.get("apiRequestsRemaining"))
+        self.plan = str(meta.get("apiPlan") or self.plan)
+        return body
+
+    def quota_note(self) -> str:
+        parts = []
+        if self.requests_left_today is not None:
+            parts.append(f"{self.requests_left_today} JustTCG requests left today")
+        if self.requests_left_month is not None:
+            parts.append(f"{self.requests_left_month} this month")
+        return ", ".join(parts)
+
+    @staticmethod
+    def nm_prices(body: dict, product_id: int) -> dict[str, float]:
+        """{printing: price} for the Near Mint variants of one product in a /cards answer.
+
+        Takes the card whose tcgplayerId matches (the filter should return just one, but
+        a search can bring back several). A variant with no current price falls back to
+        its last known one; one with neither is skipped.
+        """
+        cards = body.get("data") or []
+        card = next((c for c in cards if str(c.get("tcgplayerId")) == str(product_id)), None)
+        if card is None:
+            card = cards[0] if len(cards) == 1 else None
+        out: dict[str, float] = {}
+        for v in (card or {}).get("variants") or []:
+            cond = str(v.get("condition") or "")
+            if cond not in ("Near Mint", "NM"):
+                continue
+            price = _f(v.get("price"))
+            if price is None:
+                price = _f(v.get("lastKnownPrice"))
+            if price is None:
+                continue
+            out[str(v.get("printing") or "Normal")] = price
+        return out
+
+    def _lookup(self, product_id: int) -> dict[str, float]:
+        body = self._get(tcgplayerId=str(product_id), condition="NM", language="English",
+                         include_price_history="false", limit=5)
+        return self.nm_prices(body, product_id)
+
+    def get(self, card: CardRecord) -> PriceQuote:
+        if not card.tcgplayer_id:
+            raise PriceNotFound("card has no TCGplayer product id")
+        prices = self._lookup(card.tcgplayer_id)
+        finishes = card.finishes.split(",") if card.finishes else []
+        if card.tcgplayer_etched_id and "etched" in finishes and card.tcgplayer_etched_id != card.tcgplayer_id:
+            # Etched foils are a product of their own on TCGplayer; its foil printing is the etched price.
+            try:
+                etched = self._lookup(card.tcgplayer_etched_id)
+                price = next((p for k, p in etched.items() if "Etched" in k), None)
+                if price is None:
+                    price = etched.get("Foil", next(iter(etched.values()), None))
+                if price is not None:
+                    prices["Etched"] = price
+            except PriceNotFound:
+                pass
+        if not prices:
+            raise PriceNotFound("JustTCG has no Near Mint price for this product")
+        q = PriceQuote(source=self.name, url=card.tcgplayer_listing_url() or card.tcgplayer_product_url,
+                       low_kind="Near Mint")
+        q.low = prices.get("Normal")
+        q.low_foil = prices.get("Foil")
+        q.low_etched = next((p for k, p in prices.items() if "Etched" in k), None)
+        # JustTCG has no separate market figure; Scryfall's daily TCGplayer market fills in.
+        q.market, q.market_foil, q.market_etched = card.usd, card.usd_foil, card.usd_etched
+        notes = ["market is Scryfall's daily figure"]
+        quota = self.quota_note()
+        if quota:
+            notes.append(quota)
+        q.note = "; ".join(notes)
+        return q
+
+
+def _int(v) -> Optional[int]:
+    try:
+        return int(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
 # --- Service ---------------------------------------------------------------------------
 
 PriceCallback = Callable[[CardRecord, PriceQuote], None]
@@ -539,7 +713,7 @@ class PriceService:
     """Caching, background price lookups with provider fallback."""
 
     def __init__(self, mode: str = MODE_TCGCSV, keys: tuple[str, str] | None = None, ttl_s: float = 900.0,
-                 cache_dir: Path | None = None):
+                 cache_dir: Path | None = None, justtcg_key: str = ""):
         self.mode = mode if mode in MODES else MODE_TCGCSV
         self.ttl_s = ttl_s
         pub, priv = keys if keys and (keys[0] or keys[1]) else keys_from_env()
@@ -551,7 +725,9 @@ class PriceService:
         self._csv = TcgcsvProvider(cache_dir=cache_dir)
         self._api = TcgplayerOfficialProvider(pub, priv)
         self._site = TcgplayerSiteProvider()
+        self._just = JustTcgProvider(justtcg_key or justtcg_key_from_env())
         self._disabled_until: dict[str, float] = {}
+        self._disabled_why: dict[str, str] = {}
         self._thread = threading.Thread(target=self._worker, name="prices", daemon=True)
         self._thread.start()
 
@@ -568,15 +744,36 @@ class PriceService:
         with self._lock:
             self._cache = {k: v for k, v in self._cache.items() if k[0] != MODE_TCG_API}
 
+    def set_justtcg_key(self, api_key: str) -> None:
+        self._just = JustTcgProvider(api_key or justtcg_key_from_env())
+        self._disabled_until.pop(MODE_JUSTTCG, None)
+        with self._lock:
+            self._cache = {k: v for k, v in self._cache.items() if k[0] != MODE_JUSTTCG}
+
     def provider_for(self, mode: str):
-        return {MODE_TCGCSV: self._csv, MODE_TCG_API: self._api, MODE_TCG_SITE: self._site}.get(mode)
+        return {MODE_TCGCSV: self._csv, MODE_TCG_API: self._api, MODE_TCG_SITE: self._site,
+                MODE_JUSTTCG: self._just}.get(mode)
+
+    @property
+    def justtcg(self) -> JustTcgProvider:
+        return self._just
+
+    def ttl_for(self, mode: str) -> float:
+        return MODE_TTL_S.get(mode, self.ttl_s)
+
+    def paused_reason(self, mode: str | None = None) -> str:
+        """Why the provider for this mode is not being asked right now, or ''."""
+        mode = mode or self.mode
+        if time.time() < self._disabled_until.get(mode, 0.0):
+            return self._disabled_why.get(mode, "paused after an error")
+        return ""
 
     # -- synchronous -----------------------------------------------------------------
     def get(self, card: CardRecord) -> PriceQuote:
         key = (self.mode, card.id)
         with self._lock:
             q = self._cache.get(key)
-        if q and time.time() - q.fetched_at < self.ttl_s:
+        if q and time.time() - q.fetched_at < self.ttl_for(self.mode):
             return q
         q = self._fetch(card)
         with self._lock:
@@ -603,32 +800,45 @@ class PriceService:
     def cached(self, card: CardRecord) -> Optional[PriceQuote]:
         with self._lock:
             q = self._cache.get((self.mode, card.id))
-        return q if q and time.time() - q.fetched_at < self.ttl_s else None
+        return q if q and time.time() - q.fetched_at < self.ttl_for(self.mode) else None
+
+    def _try(self, provider, mode: str, card: CardRecord) -> tuple[Optional[PriceQuote], str]:
+        """Ask one provider; (quote, '') on success, (None, why) otherwise."""
+        if time.time() < self._disabled_until.get(mode, 0.0):
+            return None, f"fallback: {self._disabled_why.get(mode, 'provider paused after an error')}"
+        try:
+            return provider.get(card), ""
+        except PriceNotFound as e:
+            return None, f"fallback: {e}"
+        except PriceUnavailable as e:
+            log.warning("%s unavailable (%s); leaving it alone for %d s", provider.name, e, e.retry_s)
+            self._disabled_until[mode] = time.time() + e.retry_s
+            self._disabled_why[mode] = str(e)
+            return None, f"fallback: {e}"
+        except Exception as e:
+            log.warning("%s lookup failed for %s: %s", provider.name, card.name, e)
+            return None, "fallback after lookup error"
 
     def _fetch(self, card: CardRecord) -> PriceQuote:
-        primary = self.provider_for(self.mode)
         note = ""
-        if primary is not None and time.time() >= self._disabled_until.get(self.mode, 0.0):
-            try:
-                return primary.get(card)
-            except PriceNotFound as e:
-                note = f"fallback: {e}"
-            except PriceUnavailable as e:
-                log.warning("%s unavailable (%s); using Scryfall market for 5 min", primary.name, e)
-                self._disabled_until[self.mode] = time.time() + 300
-                note = f"fallback: {e}"
-            except Exception as e:
-                log.warning("%s lookup failed for %s: %s", primary.name, card.name, e)
-                note = "fallback after lookup error"
-        elif primary is not None:
-            note = "fallback: provider paused after an error"
+        primary = self.provider_for(self.mode)
+        if primary is not None:
+            q, note = self._try(primary, self.mode, card)
+            if q is not None:
+                return q
+        # tcgcsv still has a low figure, so it comes before Scryfall's market-only answer.
+        if self.mode not in (MODE_TCGCSV, MODE_SCRYFALL):
+            q, why = self._try(self._csv, MODE_TCGCSV, card)
+            if q is not None:
+                q.note = note
+                return q
         try:
             q = self._scry.get(card)
             q.note = note
             return q
         except Exception as e:
             log.warning("Scryfall price lookup failed for %s: %s", card.name, e)
-            return PriceQuote(source="unavailable", url=card.tcgplayer_product_url, note=str(e))
+            return PriceQuote(source="unavailable", url=card.tcgplayer_product_url, note=note or str(e))
 
     # -- asynchronous ----------------------------------------------------------------
     def request(self, card: CardRecord, callback: PriceCallback) -> None:
@@ -685,6 +895,8 @@ def cli(argv: list[str] | None = None) -> int:
     print(f"{rec.name} - {rec.set_label} #{rec.collector_number}  tcgplayer_id={rec.tcgplayer_id}  finishes={rec.finishes}")
     svc = PriceService(mode=MODE_SCRYFALL)
     modes = list(MODES) if args.modes == "all" else [m.strip() for m in args.modes.split(",")]
+    if args.modes == "all" and not svc.justtcg.configured:
+        modes.remove(MODE_JUSTTCG)       # no key in JUSTTCG_API_KEY: nothing to show
     for mode in modes:
         provider = svc.provider_for(mode) or svc._scry
         t0 = time.perf_counter()

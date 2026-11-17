@@ -4,6 +4,30 @@ All notable changes to mtg-screen-scanner are recorded here. Newest entries firs
 
 ## Unreleased
 
+### User-facing (2026-11-16, JustTCG)
+- **New price mode "JustTCG Near Mint (6-hourly, free key, 100/day)".** JustTCG tracks
+  TCGplayer per condition and updates about every six hours, the freshest condition-level
+  figure available without a TCGplayer key. Paste a free justtcg.com key under **API keys...**
+  and the mode is selected for you. The Low columns then show the Near Mint price per finish;
+  the Market columns keep Scryfall's daily TCGplayer market price, and the price window says so.
+- Each card costs one request and the answer is kept for six hours, so the free plan's 100 a
+  day go a long way. The price window shows how many requests are left today and this month.
+- **When a source is paused, tcgcsv answers before Scryfall does**, so the Low columns keep a
+  figure (any condition) instead of going blank. A spent JustTCG daily quota pauses that source
+  until midnight UTC, a per-minute limit for about a minute, a rejected key for an hour, and the
+  status bar carries the reason.
+- The price-mode dropdown is wider, so no option is cut off.
+
+### Internal (2026-11-16, JustTCG)
+- `pricing.JustTcgProvider`: `GET /v1/cards?tcgplayerId=&condition=NM&language=English`
+  with `include_price_history=false`, header `x-api-key`; `nm_prices()` parses the variants;
+  etched foils are looked up by their own TCGplayer product. Quota read from `_metadata`.
+- `PriceUnavailable` carries `retry_s`; `PriceService` keeps `_disabled_why` and exposes
+  `paused_reason()`, `ttl_for()` (`MODE_TTL_S`), `set_justtcg_key()`, `justtcg`; `_fetch()` is
+  built on `_try()` and falls back primary -> tcgcsv -> Scryfall. New env var `JUSTTCG_API_KEY`,
+  new setting `justtcg_api_key`. The CLI skips the JustTCG mode when no key is set.
+- `tests/test_pricing_justtcg.py`: parsing, quote shape, error codes, quota, fallback chain.
+
 ### User-facing (2026-11-16, price details)
 - **New "Price details" window**, opened by the button or by pressing Enter on a row. It
   shows every figure the app holds for that card, low and market for each finish it was
